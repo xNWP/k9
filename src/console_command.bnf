@@ -1,0 +1,58 @@
+<command> ::= <name> <ws_plus> <command_parameters>
+    | <name>
+<command_parameters> ::= <command_param>
+    | <command_parameters> <ws_plus> <command_param>
+    | ""
+<command_param> ::= <flag>
+    | <indexed_value>
+    | <name_value_pair>
+
+<name_value_pair> ::= <name> <ws_star> ":" <ws_star> <value>
+
+<flag> ::= "--" <name>
+
+<indexed_value> ::= <value>
+
+<name> ::= <identifier>
+
+<value> ::= '"' <string_explicit> '"'
+    | <string_implicit>
+    | '""'
+
+<string_implicit> ::= <valid_implicit_string_start>
+    | <string_implicit> <string_base>
+<string_explicit> ::= <string_full>
+    | <string_explicit> <string_full>
+<string_base> ::= <valid_implicit_string_start> | "-"
+<string_full> ::= <string_base> | ":" | " "
+<valid_implicit_string_start> ::= <letter> | <digit> | <symbol_base> | <escape_char>
+
+<escape_char> ::= "\" <escape_value>
+<escape_value> ::= <letter> | <digit> | <symbol>
+
+<digit> ::= "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+
+<identifier> ::= <letter> | "_"
+    | <identifier> <letter>
+    | <identifier> <digit>
+    | <identifier> "_"
+
+<letter> ::= <upper_letter> | <lower_letter>
+<upper_letter> ::= "A" | "B" | "C" | "D" | "E" | "F" | "G"
+    | "H" | "I" | "J" | "K" | "L" | "M" | "N"
+    | "O" | "P" | "Q" | "R" | "S" | "T" | "U"
+    | "V" | "W" | "X" | "Y" | "Z"
+<lower_letter> ::= "a" | "b" | "c" | "d" | "e" | "f" | "g"
+    | "h" | "i" | "j" | "k" | "l" | "m" | "n"
+    | "o" | "p" | "q" | "r" | "s" | "t" | "u"
+    | "v" | "w" | "x" | "y" | "z"
+
+<symbol> ::= <symbol_base> | '"' | " " | "	" | "\"
+<symbol_base> ::= "`" | "~" | "!" | "@" | "#" | "$" | "%" | "^"
+    | "&" | "*" | "(" | ")" | "_" | "=" | "+"
+    | "[" | "{" | "]" | "}" | "|" | ";"
+    | "'" | "," | "<" | "." | ">" | "/" | "?"
+
+<ws> ::= " " | "	"
+<ws_plus> ::= <ws> | <ws_plus> <ws>
+<ws_star> ::= <ws_plus> | ""
