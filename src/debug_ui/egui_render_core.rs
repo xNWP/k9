@@ -1,13 +1,11 @@
-use std::{time::Instant, collections::BTreeMap};
+use std::{collections::BTreeMap, time::Instant};
 
 use bytemuck::{offset_of, Pod, Zeroable};
-use egui::{PaintCallbackInfo, epaint::Primitive};
+use egui::{epaint::Primitive, PaintCallbackInfo};
 use glow::HasContext;
 use sdl2::clipboard::ClipboardUtil;
 
-
 const SCROLL_SCALE: f32 = 20.0;
-
 
 pub(super) struct EguiRenderCore {
     pub(super) ctx: egui::Context,
@@ -182,7 +180,6 @@ impl EguiRenderCore {
         (clipped_prims, texs_delta, full_output.platform_output)
     }
 
-
     fn fire_egui_events(
         &mut self,
         sdl_events: &Vec<sdl2::event::Event>,
@@ -211,15 +208,15 @@ impl EguiRenderCore {
                     let pos = egui::pos2(*x as f32 / ppt, *y as f32 / ppt);
 
                     let button = match mouse_btn {
-                            sdl2::mouse::MouseButton::Left => Some(egui::PointerButton::Primary),
-                            sdl2::mouse::MouseButton::Right => Some(egui::PointerButton::Secondary),
-                            sdl2::mouse::MouseButton::Middle => Some(egui::PointerButton::Middle),
-                            sdl2::mouse::MouseButton::X1 => Some(egui::PointerButton::Extra1),
-                            sdl2::mouse::MouseButton::X2 => Some(egui::PointerButton::Extra2),
-                            sdl2::mouse::MouseButton::Unknown => {
-                                log::warn!("unknown mouse button pressed");
-                                None
-                            }
+                        sdl2::mouse::MouseButton::Left => Some(egui::PointerButton::Primary),
+                        sdl2::mouse::MouseButton::Right => Some(egui::PointerButton::Secondary),
+                        sdl2::mouse::MouseButton::Middle => Some(egui::PointerButton::Middle),
+                        sdl2::mouse::MouseButton::X1 => Some(egui::PointerButton::Extra1),
+                        sdl2::mouse::MouseButton::X2 => Some(egui::PointerButton::Extra2),
+                        sdl2::mouse::MouseButton::Unknown => {
+                            log::warn!("unknown mouse button pressed");
+                            None
+                        }
                     };
 
                     if let Some(butt) = button {
@@ -255,16 +252,16 @@ impl EguiRenderCore {
                             log::warn!("unknown mouse button pressed");
                             None
                         }
-                };
+                    };
 
-                if let Some(butt) = button {
-                    self.input.events.push(egui::Event::PointerButton {
-                        pos,
-                        button: butt,
-                        pressed: false,
-                        modifiers: egui_modifiers,
-                    });
-                }
+                    if let Some(butt) = button {
+                        self.input.events.push(egui::Event::PointerButton {
+                            pos,
+                            button: butt,
+                            pressed: false,
+                            modifiers: egui_modifiers,
+                        });
+                    }
                 }
                 sdl2::event::Event::MouseMotion {
                     timestamp: _,
@@ -276,8 +273,7 @@ impl EguiRenderCore {
                     xrel: _,
                     yrel: _,
                 } => {
-                    let tf_mouse_pos =
-                        egui::pos2(*x as f32 / ppt, *y as f32 / ppt);
+                    let tf_mouse_pos = egui::pos2(*x as f32 / ppt, *y as f32 / ppt);
                     self.input
                         .events
                         .push(egui::Event::PointerMoved(tf_mouse_pos));
@@ -360,19 +356,6 @@ impl EguiRenderCore {
                                     });
                                 }
                             }
-                            // TODO: move to console
-                            //sdl2::keyboard::Keycode::D => {
-                            //    if self.modifiers.control && self.console_has_focus {
-                            //        self.delete_console_text = true;
-                            //    } else {
-                            //        self.input.events.push(egui::Event::Key {
-                            //            key: egui::Key::D,
-                            //            pressed: true,
-                            //            repeat: *repeat,
-                            //            modifiers: egui_modifiers,
-                            //        });
-                            //    }
-                            //}
                             kc => {
                                 if let Some(ekey) = sdl_keycode_to_egui_key(kc) {
                                     self.input.events.push(egui::Event::Key {
@@ -468,7 +451,12 @@ impl EguiRenderCore {
         }
 
         // todo: verify that switching checking the ctx scale for ui works here
-        self.paint_primitives(glow, screen_dimensions, self.ctx.pixels_per_point(), clipped_primitives);
+        self.paint_primitives(
+            glow,
+            screen_dimensions,
+            self.ctx.pixels_per_point(),
+            clipped_primitives,
+        );
 
         // free textures
         for id in textures_delta.free {
@@ -762,7 +750,6 @@ impl EguiRenderCore {
             self.sdl_cursor = Some(new_cursor);
         }
     }
-
 }
 
 struct ModifierTracker {

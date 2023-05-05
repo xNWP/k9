@@ -5,7 +5,10 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::{system::{FrameState, FirstCallState}, System, SystemCallbacks};
+use crate::{
+    system::{FirstCallState, FrameState},
+    System, SystemCallbacks,
+};
 
 use super::{component::GraphicsComponent, renderer::RenderCommand, Vertex};
 

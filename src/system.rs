@@ -2,7 +2,11 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 
-use crate::{camera::ScreenCamera, debug_ui::{ConsoleCommand, DebugUiWindow}, entity_component::EntityTable};
+use crate::{
+    camera::ScreenCamera,
+    debug_ui::{console::DebugUiWindow, ConsoleCommand},
+    entity_component::EntityTable,
+};
 
 pub trait System: SystemCallbacks {
     const UUID: Uuid;

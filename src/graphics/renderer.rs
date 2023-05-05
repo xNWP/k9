@@ -1,12 +1,6 @@
 use std::collections::BTreeMap;
 
-use bytemuck::{offset_of, Pod, Zeroable};
-use egui::{epaint::Primitive, PaintCallbackInfo, Painter};
 use glow::HasContext;
-use sdl2::{
-    video::{GLContext, Window},
-    EventPump, Sdl, VideoSubsystem,
-};
 use std::fmt::Display;
 use uuid::Uuid;
 
@@ -18,25 +12,17 @@ pub struct K9Renderer {
     shader_sources: BTreeMap<Uuid, glow::NativeShader>,
     shader_program_sources: BTreeMap<Uuid, glow::NativeProgram>,
     uniform_links: BTreeMap<Uuid, glow::NativeUniformLocation>,
-    exit_called: bool,
-    sdl_events: Vec<sdl2::event::Event>,
 }
 
 impl K9Renderer {
-    pub fn new(glow: &glow::Context) -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
         Ok(Self {
             vertex_sources: BTreeMap::new(),
             texture_sources: BTreeMap::new(),
             shader_sources: BTreeMap::new(),
             shader_program_sources: BTreeMap::new(),
             uniform_links: BTreeMap::new(),
-            exit_called: false,
-            sdl_events: Vec::new(),
         })
-    }
-
-    pub fn exit_called(&self) -> bool {
-        self.exit_called
     }
 
     pub fn render(&mut self, glow: &glow::Context, cmds: Vec<RenderCommand>) {

@@ -1,5 +1,8 @@
-use proc_macro::TokenStream;
+#![feature(proc_macro_diagnostic)]
+
+use proc_macro::{TokenStream, Diagnostic};
 use quote::quote;
+use quote::spanned::Spanned;
 use syn::parse::Parse;
 use syn::{braced, Ident};
 use syn::{parse_macro_input, Token};
@@ -24,70 +27,92 @@ fn console_command_base(tokens: TokenStream, internal: bool) -> TokenStream {
     let crate_name = if internal { "crate" } else { "k9" };
 
     for f in pi.fields {
-        match_str += format!(
-            r#"
-            let {0} = if let Some(x) = args.get("{0}") {{
-                match x {{
-                    {1},
-                    _ => return Err("'{0}' was not a valid {2:?}".to_owned()),
-                }}
-            }} else {{
-                return Err("missing variable '{0}'".to_owned());
-            }};
-        "#,
-            f.name,
-            match_callback_arg_value(&f.ty, crate_name),
-            f.ty
-        )
-        .as_str();
+        if f.optional{
+            match_str += format!(
+                r#"
+                let {0}: {3} = if let Some(x) = args.get("{0}") {{
+                    match x {{
+                        {1},
+                        _ => return Err("'{0}' was not a valid {2:?}".to_owned()),
+                    }}
+                }} else {{
+                    None
+                }};
+                "#,
+                f.name,
+                match_callback_arg_value(&f, crate_name),
+                f.ty,
+                match_callback_arg_type_annotation(&f),
+            ).as_str();
+        } else {
+            match_str += format!(
+                r#"
+                let {0}: {3} = if let Some(x) = args.get("{0}") {{
+                    match x {{
+                        {1},
+                        _ => return Err("'{0}' was not a valid {2:?}".to_owned()),
+                    }}
+                }} else {{
+                    return Err("missing variable '{0}'".to_owned());
+                }};
+                "#,
+                f.name,
+                match_callback_arg_value(&f, crate_name),
+                f.ty,
+                match_callback_arg_type_annotation(&f),
+            )
+            .as_str();
+        }
 
         args_str += format!(
             r#"
-            args.push({crate_name}::debug_ui::CallbackArgumentDefinition {{
+            args.push({crate_name}::debug_ui::console::CallbackArgumentDefinition {{
                 name: "{0}".to_owned(),
                 cba_type: {1},
+                optional: {2}
             }});
-        "#,
+            "#,
             f.name,
-            match_callback_arg_type(&f.ty, crate_name)
+            match_callback_arg_type_core(&f, crate_name),
+            f.optional,
         )
         .as_str();
 
         param_names += format!("{}, ", f.name).as_str();
     }
 
-    param_names = param_names[0..param_names.len() - 2].to_owned();
-
+    if !param_names.is_empty() {
+        param_names = param_names[0..param_names.len() - 2].to_owned();
+    }
+    
     let inner_cb = pi.callback;
     let inner_cb = quote! { #inner_cb }.to_string();
     let output_str = format!(
         r#"
-            {{
-                let cb = move |
-                        ccf: {crate_name}::debug_ui::ConsoleCommandInterface,
-                        args: std::collections::BTreeMap<String, {crate_name}::debug_ui::CallbackArgumentValue>
-                    | {{
-                    {match_str}
-                    
-                    let mut inner_cb = {0};
-                    
-                    return inner_cb(ccf, {param_names});
-                }};
-                
-                let mut args = Vec::new();
-                {args_str}
-                {crate_name}::debug_ui::ConsoleCommand::new(cb, args)
-            }}
+        {{
+            let cb = move |
+            ccf: {crate_name}::debug_ui::console::ConsoleCommandInterface,
+            args: std::collections::BTreeMap<String, {crate_name}::debug_ui::console::CallbackArgumentValue>
+            | {{
+                {match_str}
+                let mut inner_cb = {0};
+                return inner_cb(ccf, {param_names});
+            }};
+            
+            let mut args = Vec::new();
+            {args_str}
+            {crate_name}::debug_ui::ConsoleCommand::new(cb, args)
+        }}
         "#,
         inner_cb,
     );
-
+    //println!("{output_str}");
     output_str.parse().unwrap()
 }
 
-fn match_callback_arg_type(field_type: &ParameterType, crate_name: &str) -> String {
-    let core = format!("{crate_name}::debug_ui::CallbackArgumentType::");
-    match field_type {
+fn match_callback_arg_type_core(field: &ParameterParseInfo, crate_name: &str) -> String {
+    let core = format!("{crate_name}::debug_ui::console::CallbackArgumentType::");
+    match &field.ty {
         &ParameterType::F32 => core + "Float32",
         &ParameterType::F64 => core + "Float64",
         &ParameterType::I32 => core + "Int32",
@@ -98,16 +123,40 @@ fn match_callback_arg_type(field_type: &ParameterType, crate_name: &str) -> Stri
     }
 }
 
-fn match_callback_arg_value(field_type: &ParameterType, crate_name: &str) -> String {
-    let core = format!("{crate_name}::debug_ui::CallbackArgumentValue::");
-    match field_type {
-        &ParameterType::F32 => core + "Float32(x) => *x",
-        &ParameterType::F64 => core + "Float64(x) => *x",
-        &ParameterType::I32 => core + "Int32(x) => *x",
-        &ParameterType::I64 => core + "Int64(x) => *x",
-        &ParameterType::String => core + "String(x) => *x",
-        &ParameterType::Bool => core + "Bool(x) => *x",
-        &ParameterType::Flag => core + "Flag(x) => *x",
+fn match_callback_arg_type_annotation(field: &ParameterParseInfo) -> String {
+    let core = match field.ty {
+        ParameterType::Bool => "bool",
+        ParameterType::F32 => "f32",
+        ParameterType::F64 => "f64",
+        ParameterType::Flag => "bool",
+        ParameterType::I32 => "i32",
+        ParameterType::I64 => "i64",
+        ParameterType::String => "String",
+    };
+
+    if field.optional {
+        format!("Option<{core}>")
+    } else {
+        core.to_owned()
+    }
+}
+
+fn match_callback_arg_value(field: &ParameterParseInfo, crate_name: &str) -> String {
+    let core = format!("{crate_name}::debug_ui::console::CallbackArgumentValue::");
+    let value = if field.optional {
+        "Some(*x)"
+    } else {
+        "*x"
+    };
+
+    match field.ty {
+        ParameterType::F32 => core + format!("Float32(x) => {value}").as_str(),
+        ParameterType::F64 => core + format!("Float64(x) => {value}").as_str(),
+        ParameterType::I32 => core + format!("Int32(x) => {value}").as_str(),
+        ParameterType::I64 => core + format!("Int64(x) => {value}").as_str(),
+        ParameterType::String => core + format!("String(x) => {value}").as_str(),
+        ParameterType::Bool => core + format!("Bool(x) => {value}").as_str(),
+        ParameterType::Flag => core + format!("Flag(x) => {value}").as_str(),
     }
 }
 
@@ -163,9 +212,9 @@ mod kw {
 }
 impl Parse for ParameterParseInfo {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let optional = input.parse::<kw::opt>().is_ok();
+        let optional = input.parse::<kw::opt>();
         let name = input.parse::<Ident>()?.to_string();
-        let _ = input.parse::<Token![:]>()?;
+        let colon = input.parse::<Token![:]>()?;
         let ty = if input.parse::<kw::f32>().is_ok() {
             ParameterType::F32
         } else if input.parse::<kw::f64>().is_ok() {
@@ -179,17 +228,28 @@ impl Parse for ParameterParseInfo {
         } else if input.parse::<kw::String>().is_ok() {
             ParameterType::String
         } else if input.parse::<kw::Flag>().is_ok() {
+            if let Ok(opt) = optional {
+                Diagnostic::spanned(opt.span.unwrap(), proc_macro::Level::Warning, "flag marked optional, flags are always considered optional.").emit();
+            }
+
             ParameterType::Flag
         } else {
-            panic!(
-                "unknown parameter type: {}",
-                input
-                    .parse::<Ident>()
-                    .and_then(|v| Ok(v.to_string()))
-                    .unwrap_or_default()
-            );
+            let (span, msg) = if let Ok(bad_type) = input.parse::<Ident>() {
+                (
+                    bad_type.span(),
+                    format!("unknown parameter type: {}", bad_type.to_string())
+                )
+            } else {
+                (
+                    colon.span,
+                    "expected parameter type".to_owned(),
+                )
+            };
+            //diag.emit();
+            return Err(syn::Error::new(span, msg));
         };
 
+        let optional = optional.is_ok();
         Ok(Self { name, ty, optional })
     }
 }

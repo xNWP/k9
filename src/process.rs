@@ -1,9 +1,11 @@
 use std::{
     collections::BTreeMap,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use glow::HasContext;
+use k9_proc_macros::console_command_internal;
 
 use crate::{
     camera::{Angle, ScreenCamera},
@@ -11,7 +13,7 @@ use crate::{
     entity_component::{Entity, EntityTable},
     graphics::{GraphicsSystem, K9Renderer, SceneDirectorComponent},
     profile::ProfileSet,
-    system::{FrameState, SystemCallbacks, FirstCallState},
+    system::{FirstCallState, FrameState, SystemCallbacks},
 };
 
 pub struct CreationArgs {
@@ -121,8 +123,7 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
 
     sdl_wnd.show();
 
-    let mut k9 =
-        K9Renderer::new(&glow).map_err(|e| format!("couldn't init graphics system: {e}"))?;
+    let mut k9 = K9Renderer::new().map_err(|e| format!("couldn't init graphics renderer: {e}"))?;
     let mut gfx_system = GraphicsSystem::new();
 
     #[allow(unused_assignments)] // is used in log::info
@@ -158,8 +159,18 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
     // setup some console commands
     let mut console_commands = BTreeMap::new();
 
+    let is_finished = Arc::new(Mutex::new(false));
+    // quit command
+    {
+        let flag = is_finished.clone();
+        let cc = console_command_internal!({}, |_| {
+            *flag.lock().unwrap() = true;
+            Ok(())
+        });
+        assert!(console_commands.insert("quit".to_owned(), cc).is_none());
+    }
+
     let mut current_render_commands = Some(Vec::new());
-    let mut is_finished = false;
 
     let mut profile_update_time = Instant::now();
 
@@ -168,21 +179,20 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
     // do first calls for systems
     let mut debug_windows = BTreeMap::new();
     for system in &mut user_systems {
-        system.first_call(FirstCallState {
-            console_commands: &mut console_commands,
-            debug_windows: &mut debug_windows,
-        },
-        FrameState {
-            ents: &mut entities,
-            sdl_events: &sdl_events,
-            screen_camera: &mut screen_camera,
-            screen_dimensions,
-            screen_scale: system_scale,
-        });
+        system.first_call(
+            FirstCallState {
+                console_commands: &mut console_commands,
+                debug_windows: &mut debug_windows,
+            },
+            FrameState {
+                ents: &mut entities,
+                sdl_events: &sdl_events,
+                screen_camera: &mut screen_camera,
+                screen_dimensions,
+                screen_scale: system_scale,
+            },
+        );
     }
-
-    // setup debug ui
-    //debug_windows.insert("foo_window", )
 
     let mut draw_debug_ui = false;
     let mut debug_ui = EguiDebugUi::new(&glow, system_scale, console_commands, debug_windows);
@@ -190,36 +200,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
     loop {
         // MAIN PROGRAM LOOP
         sdl_events = sdl_ep.poll_iter().collect();
-
-        if draw_debug_ui {
-            //debug_ui.begin_frame(
-            //    sdl_wnd.window_flags() & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_INPUT_FOCUS as u32
-            //        != 0,
-            //    &sdl_events,
-            //    screen_dimensions,
-            //    &clipboard_util,
-            //);
-        }
-
-        if is_finished {
-            for system in &mut user_systems {
-                system.exiting(FrameState {
-                    ents: &mut entities,
-                    sdl_events: &sdl_events,
-                    screen_camera: &mut screen_camera,
-                    screen_dimensions,
-                    screen_scale: system_scale,
-                });
-            }
-            gfx_system.exiting(FrameState {
-                ents: &mut entities,
-                sdl_events: &sdl_events,
-                screen_camera: &mut screen_camera,
-                screen_dimensions,
-                screen_scale: system_scale,
-            });
-            break;
-        }
 
         frame_profile.scoped_run(|| {
             user_systems_profile.scoped_run(|| {
@@ -252,26 +232,27 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
                 };
                 #[cfg(debug_assertions)]
                 k9.render(&glow, current_render_commands.take().unwrap());
-
-                if k9.exit_called() {
-                    is_finished = true;
-                }
             });
             current_render_commands = Some(render_commands);
         });
 
         if draw_debug_ui {
-            //debug_ui.draw(screen_dimensions, &dbg_logger_shared);
-            //let (clipped_primitives, textures_delta, platform_output) = debug_ui.end_frame();
-            //debug_ui.handle_platform_output(platform_output, &clipboard_util);
-            debug_ui.render(&glow, &sdl_events, &clipboard_util, screen_dimensions, sdl_wnd.window_flags() & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_INPUT_FOCUS as u32 != 0, &dbg_logger_shared);
+            debug_ui.render(
+                &glow,
+                &sdl_events,
+                &clipboard_util,
+                screen_dimensions,
+                sdl_wnd.window_flags() & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_INPUT_FOCUS as u32
+                    != 0,
+                &dbg_logger_shared,
+            );
         }
 
         sdl_wnd.gl_swap_window();
 
         for event in &sdl_events {
             match event {
-                sdl2::event::Event::Quit { timestamp: _ } => is_finished = true,
+                sdl2::event::Event::Quit { timestamp: _ } => *is_finished.lock().unwrap() = true,
                 sdl2::event::Event::KeyUp {
                     timestamp: _,
                     window_id: _,
@@ -357,15 +338,34 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
             frame_profile.clear();
             profile_update_time = Instant::now();
         }
+
+        // handle shutdown
+        if *is_finished.lock().unwrap() {
+            for system in &mut user_systems {
+                system.exiting(FrameState {
+                    ents: &mut entities,
+                    sdl_events: &sdl_events,
+                    screen_camera: &mut screen_camera,
+                    screen_dimensions,
+                    screen_scale: system_scale,
+                });
+            }
+            gfx_system.exiting(FrameState {
+                ents: &mut entities,
+                sdl_events: &sdl_events,
+                screen_camera: &mut screen_camera,
+                screen_dimensions,
+                screen_scale: system_scale,
+            });
+            break;
+        }
     }
 
     Ok(())
 }
 
 fn debug_callback(_src: u32, ty: u32, id: u32, severity: u32, msg: &str) {
-
-
-    let sev = match severity {
+    let sev_str = match severity {
         glow::DEBUG_SEVERITY_HIGH => "HIGH",
         glow::DEBUG_SEVERITY_MEDIUM => "MEDIUM",
         glow::DEBUG_SEVERITY_LOW => "LOW",
@@ -373,26 +373,25 @@ fn debug_callback(_src: u32, ty: u32, id: u32, severity: u32, msg: &str) {
         _ => "",
     };
 
-    match ty {
-        glow::DEBUG_TYPE_ERROR => log::error!("GL CALLBACK: ERROR{{0x{:x}}}, {sev}{{0x{:x}}}, {msg:?}", ty, severity),
-        glow::DEBUG_TYPE_ERROR => log::error!("GL CALLBACK: ERROR{{0x{:x}}}, {sev}{{0x{:x}}}, {msg:?}", ty, severity),
-        _ => {},
-    }
+    let type_str = match ty {
+        glow::DEBUG_TYPE_ERROR => "ERROR",
+        glow::DEBUG_TYPE_MARKER => "MARKER",
+        glow::DEBUG_TYPE_DEPRECATED_BEHAVIOR => "DEPRECATED_BEHAVIOUR",
+        glow::DEBUG_TYPE_OTHER => "OTHER",
+        glow::DEBUG_TYPE_PERFORMANCE => "PERFORMANCE",
+        glow::DEBUG_TYPE_POP_GROUP => "POP_GROUP",
+        glow::DEBUG_TYPE_PUSH_GROUP => "PUSH_GROUP",
+        glow::DEBUG_TYPE_PORTABILITY => "PORTABILITY",
+        glow::DEBUG_TYPE_UNDEFINED_BEHAVIOR => "UNDEFINED_BEHAVIOUR",
+        _ => "",
+    };
 
+    let msg = format!("GL CALLBACK: id{{0x{id:x}}}, src {type_str}{{0x{ty:x}}}, {sev_str}{{0x{severity:x}}}, {:?}", unescaper::unescape(msg).unwrap());
     match severity {
-        glow::DEBUG_SEVERITY_HIGH => log::error!("GL CALLBACK: ")
+        glow::DEBUG_SEVERITY_HIGH => log::error!("{msg}"),
+        glow::DEBUG_SEVERITY_MEDIUM => log::warn!("{msg}"),
+        glow::DEBUG_SEVERITY_LOW => log::info!("{msg}"),
+        glow::DEBUG_SEVERITY_NOTIFICATION => log::trace!("{msg}"),
+        _ => {}
     }
-
-    //log::error!(
-    //    "GL CALLBACK: {} type = 0x{:x}, sev = 0x{:x}, message = {:?}",
-    //    {
-    //        match ty {
-    //            glow::DEBUG_TYPE_ERROR =>
-    //            _ => "",
-    //        }
-    //    },
-    //    ty,
-    //    severity,
-    //    unescaper::unescape(msg).unwrap(),
-    //)
 }
