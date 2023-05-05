@@ -1,7 +1,7 @@
-use proc_macro::{TokenStream, TokenTree};
+use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::Parse;
-use syn::{braced, bracketed, Ident};
+use syn::{braced, Ident};
 use syn::{parse_macro_input, Token};
 
 #[proc_macro]
@@ -63,14 +63,18 @@ fn console_command_base(tokens: TokenStream, internal: bool) -> TokenStream {
     let output_str = format!(
         r#"
             {{
-                let mut args = Vec::new();
-                let cb = move |args: std::collections::BTreeMap<String, {crate_name}::debug_ui::CallbackArgumentValue>| {{
+                let cb = move |
+                        ccf: {crate_name}::debug_ui::ConsoleCommandInterface,
+                        args: std::collections::BTreeMap<String, {crate_name}::debug_ui::CallbackArgumentValue>
+                    | {{
                     {match_str}
-
+                    
                     let mut inner_cb = {0};
-
-                    return inner_cb({param_names});
+                    
+                    return inner_cb(ccf, {param_names});
                 }};
+                
+                let mut args = Vec::new();
                 {args_str}
                 {crate_name}::debug_ui::ConsoleCommand::new(cb, args)
             }}

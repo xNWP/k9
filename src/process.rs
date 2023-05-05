@@ -11,7 +11,7 @@ use crate::{
     entity_component::{Entity, EntityTable},
     graphics::{GraphicsSystem, K9Renderer, SceneDirectorComponent},
     profile::ProfileSet,
-    system::{FrameState, SystemCallbacks},
+    system::{FrameState, SystemCallbacks, FirstCallState},
 };
 
 pub struct CreationArgs {
@@ -155,8 +155,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
         }
     };
 
-    let mut ui_scale = system_scale;
-
     // setup some console commands
     let mut console_commands = BTreeMap::new();
 
@@ -165,35 +163,42 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
 
     let mut profile_update_time = Instant::now();
 
-    let mut draw_debug_ui = false;
-    let mut debug_ui = EguiDebugUi::new(&glow, ui_scale, &mut console_commands);
-
     let clipboard_util = sdl_vss.clipboard();
 
     // do first calls for systems
+    let mut debug_windows = BTreeMap::new();
     for system in &mut user_systems {
-        system.first_call(FrameState {
+        system.first_call(FirstCallState {
+            console_commands: &mut console_commands,
+            debug_windows: &mut debug_windows,
+        },
+        FrameState {
             ents: &mut entities,
             sdl_events: &sdl_events,
             screen_camera: &mut screen_camera,
             screen_dimensions,
             screen_scale: system_scale,
-            console_commands: &mut console_commands,
         });
     }
+
+    // setup debug ui
+    //debug_windows.insert("foo_window", )
+
+    let mut draw_debug_ui = false;
+    let mut debug_ui = EguiDebugUi::new(&glow, system_scale, console_commands, debug_windows);
 
     loop {
         // MAIN PROGRAM LOOP
         sdl_events = sdl_ep.poll_iter().collect();
 
         if draw_debug_ui {
-            debug_ui.begin_frame(
-                sdl_wnd.window_flags() & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_INPUT_FOCUS as u32
-                    != 0,
-                &sdl_events,
-                screen_dimensions,
-                &clipboard_util,
-            );
+            //debug_ui.begin_frame(
+            //    sdl_wnd.window_flags() & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_INPUT_FOCUS as u32
+            //        != 0,
+            //    &sdl_events,
+            //    screen_dimensions,
+            //    &clipboard_util,
+            //);
         }
 
         if is_finished {
@@ -204,7 +209,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
                     screen_camera: &mut screen_camera,
                     screen_dimensions,
                     screen_scale: system_scale,
-                    console_commands: &mut console_commands,
                 });
             }
             gfx_system.exiting(FrameState {
@@ -213,7 +217,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
                 screen_camera: &mut screen_camera,
                 screen_dimensions,
                 screen_scale: system_scale,
-                console_commands: &mut console_commands,
             });
             break;
         }
@@ -227,7 +230,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
                         screen_camera: &mut screen_camera,
                         screen_dimensions,
                         screen_scale: system_scale,
-                        console_commands: &mut console_commands,
                     });
                 }
             });
@@ -239,7 +241,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
                     screen_camera: &mut screen_camera,
                     screen_dimensions,
                     screen_scale: system_scale,
-                    console_commands: &mut console_commands,
                 });
                 gfx_system.get_render_commands()
             });
@@ -252,8 +253,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
                 #[cfg(debug_assertions)]
                 k9.render(&glow, current_render_commands.take().unwrap());
 
-                ui_scale = debug_ui.get_ui_scale();
-
                 if k9.exit_called() {
                     is_finished = true;
                 }
@@ -262,16 +261,10 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
         });
 
         if draw_debug_ui {
-            debug_ui.draw(screen_dimensions, &dbg_logger_shared, &mut console_commands);
-            let (clipped_primitives, textures_delta, platform_output) = debug_ui.end_frame();
-            debug_ui.handle_platform_output(platform_output, &clipboard_util);
-            debug_ui.render(
-                &glow,
-                screen_dimensions,
-                ui_scale,
-                clipped_primitives,
-                textures_delta,
-            );
+            //debug_ui.draw(screen_dimensions, &dbg_logger_shared);
+            //let (clipped_primitives, textures_delta, platform_output) = debug_ui.end_frame();
+            //debug_ui.handle_platform_output(platform_output, &clipboard_util);
+            debug_ui.render(&glow, &sdl_events, &clipboard_util, screen_dimensions, sdl_wnd.window_flags() & sdl2::sys::SDL_WindowFlags::SDL_WINDOW_INPUT_FOCUS as u32 != 0, &dbg_logger_shared);
         }
 
         sdl_wnd.gl_swap_window();

@@ -5,7 +5,7 @@ use std::{
 
 use uuid::Uuid;
 
-use crate::{system::FrameState, System, SystemCallbacks};
+use crate::{system::{FrameState, FirstCallState}, System, SystemCallbacks};
 
 use super::{component::GraphicsComponent, renderer::RenderCommand, Vertex};
 
@@ -441,7 +441,7 @@ impl System for GraphicsSystem {
     const UUID: Uuid = uuid::uuid!("adcc866b-a2a4-4225-aa97-8aec4cc81107");
 }
 impl SystemCallbacks for GraphicsSystem {
-    fn first_call(&mut self, _state: FrameState) {}
+    fn first_call(&mut self, _first_call_state: FirstCallState, _state: FrameState) {}
     fn update(&mut self, state: FrameState) {
         let ents = state.ents;
 

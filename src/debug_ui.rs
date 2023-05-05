@@ -1,24 +1,20 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Mutex, RwLock},
-    time::Instant,
 };
 
 use bnf::{ParseTree, ParseTreeNode};
-use bytemuck::{offset_of, Pod, Zeroable};
 use egui::{
-    epaint::{
-        text::{cursor::RCursor, TextWrapping},
-        Primitive,
-    },
+    epaint::text::{cursor::RCursor, TextWrapping},
     text::LayoutJob,
-    Align, Color32, FontId, Frame, PaintCallbackInfo, RichText, Sense, TextFormat,
+    Align, Color32, FontId, Frame, RichText, Sense, TextFormat,
 };
 use egui_extras::Column;
-use glow::HasContext;
 use k9_proc_macros::console_command_internal;
 use sdl2::clipboard::ClipboardUtil;
 use time::OffsetDateTime;
+
+use self::egui_render_core::EguiRenderCore;
 
 const BG_COLOUR: Color32 = Color32::from_rgb(26, 0, 15);
 const BG_LIGHTER: Color32 = Color32::from_rgb(52, 1, 29);
@@ -35,28 +31,18 @@ const OFF_BG_COLOUR: Color32 = Color32::from_rgb(16, 27, 36);
 
 const BANNER_HEIGHT: f32 = 50.0;
 
-const SCROLL_SCALE: f32 = 20.0;
+
+mod egui_render_core;
 
 type Flag = bool;
 pub struct EguiDebugUi {
-    ctx: egui::Context,
-    input: egui::RawInput,
-    modifiers: ModifierTracker,
+    egui_core: EguiRenderCore,
     mouse_pos: egui::Pos2,
-    start_time: Instant,
     console_text: String,
     record_windows: Option<BTreeMap<usize, RecordWindow>>,
     ui_scale: f32,
     live_ui_scale: f32,
     set_console_focus: Flag,
-    textures: BTreeMap<egui::TextureId, glow::NativeTexture>,
-    program: glow::NativeProgram,
-    u_screen_size: glow::NativeUniformLocation,
-    u_sampler: glow::NativeUniformLocation,
-    vao: glow::NativeVertexArray,
-    vbo: glow::NativeBuffer,
-    ebo: glow::NativeBuffer,
-    sdl_cursor: Option<*mut sdl2::sys::SDL_Cursor>,
     delete_console_text: Flag,
     console_has_focus: bool,
     command_grammar: bnf::Grammar,
@@ -67,10 +53,12 @@ pub struct EguiDebugUi {
     preview_autocomplete_cmds: Vec<String>,
     draw_preview_commands_list: bool,
     last_console_window_height: f32,
+    console_commands: BTreeMap<String, ConsoleCommand>,
+    debug_windows: BTreeMap<String, (bool, Box<dyn DebugUiWindow>)>,
 }
 
 pub struct ConsoleCommand {
-    cb: Box<dyn FnMut(BTreeMap<String, CallbackArgumentValue>) -> Result<(), String> + 'static>,
+    cb: Box<dyn FnMut(ConsoleCommandInterface, BTreeMap<String, CallbackArgumentValue>) -> Result<(), String> + 'static>,
     args: Vec<CallbackArgumentDefinition>,
 }
 
@@ -103,7 +91,7 @@ pub enum CallbackArgumentType {
 }
 impl ConsoleCommand {
     pub fn new(
-        cb: impl FnMut(BTreeMap<String, CallbackArgumentValue>) -> Result<(), String> + 'static,
+        cb: impl FnMut(ConsoleCommandInterface, BTreeMap<String, CallbackArgumentValue>) -> Result<(), String> + 'static,
         args: Vec<CallbackArgumentDefinition>,
     ) -> Self {
         Self {
@@ -124,15 +112,12 @@ impl EguiDebugUi {
     pub fn new(
         glow: &glow::Context,
         default_ui_scale: f32,
-        console_commands: &mut BTreeMap<String, ConsoleCommand>,
+        mut console_commands: BTreeMap<String, ConsoleCommand>,
+        debug_windows: BTreeMap<String, Box<dyn DebugUiWindow>>,
     ) -> Self {
-        // draw code related stuffs
-        let ctx = egui::Context::default();
-        let input = egui::RawInput::default();
-
-        let modifiers = ModifierTracker::new();
+        
         let mouse_pos = egui::pos2(-100.0, -100.0); // offscreen so that it doesn't show until we get a valid mouse pos
-
+        
         let mut visuals = egui::Visuals::dark();
         visuals.override_text_color = Some(TEXT_COLOUR);
         visuals.window_stroke = egui::Stroke::new(0.8, ACCENT_COLOUR);
@@ -141,149 +126,38 @@ impl EguiDebugUi {
         visuals.widgets.hovered.bg_fill = ACCENT_DARKER;
         visuals.widgets.active.bg_fill = ACCENT_COLOUR;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, ACCENT_COLOUR);
-
+        
         let mut shadow = egui::epaint::Shadow::NONE;
         shadow.extrusion = 5.0;
         visuals.window_shadow = shadow;
-
-        ctx.set_visuals(visuals.clone());
-
-        let ui_scale = default_ui_scale;
-        ctx.set_pixels_per_point(ui_scale);
+        
+        let egui_core = EguiRenderCore::new(glow, default_ui_scale); 
+        egui_core.ctx.set_visuals(visuals.clone());
 
         // setup some console commands
         let debug_console_commands = Arc::new(Mutex::new(false));
         {
             let val = debug_console_commands.clone();
-            let cc_debug_console_command = console_command_internal!({ value: bool }, |value| {
+            let cc_debug_console_command = console_command_internal!({ value: bool }, |ccf, value| {
                 *val.lock().unwrap() = value;
                 Ok(())
             });
-            console_commands.insert(
-                "k9_debug_console_command".to_owned(),
-                cc_debug_console_command,
-            );
+            console_commands.entry("k9_debug_console_command".to_owned())
+                .and_modify(|_| log::warn!("console command 'k9_debug_console_command' was overwritten."))
+                .or_insert(cc_debug_console_command);
         }
-
-        // internal opengl render related stuffs
-        unsafe {
-            let vert_shader = match glow.create_shader(glow::VERTEX_SHADER) {
-                Ok(x) => x,
-                Err(e) => {
-                    panic!("failed to create egui debug ui vert shader: {e}");
-                }
-            };
-            const VERT_SRC: &'static str = include_str!("k9_egui_debug_ui.vert.glsl");
-
-            glow.shader_source(vert_shader, VERT_SRC);
-            glow.compile_shader(vert_shader);
-
-            if !glow.get_shader_compile_status(vert_shader) {
-                let err = glow.get_shader_info_log(vert_shader);
-                glow.delete_shader(vert_shader);
-                panic!("egui debug ui shader compile error: {err}");
-            }
-
-            let frag_shader = match glow.create_shader(glow::FRAGMENT_SHADER) {
-                Ok(x) => x,
-                Err(e) => {
-                    panic!("failed to create egui debug ui frag shader: {e}");
-                }
-            };
-            const FRAG_SRC: &'static str = include_str!("k9_egui_debug_ui.frag.glsl");
-
-            glow.shader_source(frag_shader, FRAG_SRC);
-            glow.compile_shader(frag_shader);
-
-            if !glow.get_shader_compile_status(frag_shader) {
-                let err = glow.get_shader_info_log(frag_shader);
-                glow.delete_shader(frag_shader);
-                panic!("egui debug ui shader compile error: {err}");
-            }
-
-            let program = match glow.create_program() {
-                Ok(x) => x,
-                Err(e) => panic!("failed to create egui debug ui shader program: {e}"),
-            };
-            glow.attach_shader(program, vert_shader);
-            glow.attach_shader(program, frag_shader);
-
-            glow.link_program(program);
-            glow.detach_shader(program, vert_shader);
-            glow.detach_shader(program, frag_shader);
-            glow.delete_shader(vert_shader);
-            glow.delete_shader(frag_shader);
-
-            if !glow.get_program_link_status(program) {
-                let err = glow.get_program_info_log(program);
-                panic!("couldn't link egui debug ui program: {err}");
-            }
-
-            let u_screen_size = glow.get_uniform_location(program, "u_screen_size").unwrap();
-            let u_sampler = glow.get_uniform_location(program, "u_sampler").unwrap();
-
-            let vao = glow.create_vertex_array().unwrap();
-            let vbo = glow.create_buffer().unwrap();
-            let ebo = glow.create_buffer().unwrap();
-
-            glow.bind_vertex_array(Some(vao));
-            glow.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-
-            const VERTEX_SIZE: i32 = std::mem::size_of::<EguiVertexPod>() as i32;
-
-            glow.vertex_attrib_pointer_f32(
-                0,
-                2,
-                glow::FLOAT,
-                false,
-                VERTEX_SIZE,
-                offset_of!(EguiVertexPod, pos) as i32,
-            );
-            glow.enable_vertex_attrib_array(0);
-            glow.vertex_attrib_pointer_f32(
-                1,
-                2,
-                glow::FLOAT,
-                false,
-                VERTEX_SIZE,
-                offset_of!(EguiVertexPod, uv) as i32,
-            );
-            glow.enable_vertex_attrib_array(1);
-            glow.vertex_attrib_pointer_f32(
-                2,
-                4,
-                glow::UNSIGNED_BYTE,
-                false,
-                VERTEX_SIZE,
-                offset_of!(EguiVertexPod, colour) as i32,
-            );
-            glow.enable_vertex_attrib_array(2);
-
-            glow.bind_vertex_array(None);
-            glow.bind_buffer(glow::ARRAY_BUFFER, None);
 
             const GRAMMAR: &'static str = include_str!("console_command.bnf");
             let command_grammar: bnf::Grammar = GRAMMAR.parse().unwrap();
 
             Self {
-                ctx,
-                input,
-                modifiers,
+                egui_core,
                 mouse_pos,
-                start_time: Instant::now(),
                 console_text: "".to_owned(),
                 record_windows: Some(BTreeMap::new()),
-                ui_scale,
-                live_ui_scale: ui_scale,
+                ui_scale: default_ui_scale,
+                live_ui_scale: default_ui_scale,
                 set_console_focus: false,
-                ebo,
-                program,
-                sdl_cursor: None,
-                textures: BTreeMap::new(),
-                u_sampler,
-                u_screen_size,
-                vao,
-                vbo,
                 delete_console_text: false,
                 console_has_focus: false,
                 command_grammar,
@@ -294,82 +168,42 @@ impl EguiDebugUi {
                 preview_autocomplete_cmds: Vec::new(),
                 draw_preview_commands_list: false,
                 last_console_window_height: 0.0,
+                console_commands,
+                debug_windows: debug_windows.into_iter().map(|(name, wnd)| {
+                    (name, (false, wnd))
+                }).collect(),
             }
-        }
     }
 
     pub fn set_console_focus(&mut self) {
         self.set_console_focus = true;
     }
 
-    pub fn begin_frame(
-        &mut self,
-        window_has_focus: bool,
-        sdl_events: &Vec<sdl2::event::Event>,
-        screen_dimensions: (u32, u32),
-        clipboard_util: &ClipboardUtil,
-    ) {
-        //let screen_scale = 1.0;
-        self.input.time = Some(self.start_time.elapsed().as_secs_f64());
-        self.input.has_focus = window_has_focus;
-        let w_pts = screen_dimensions.0 as f32 / self.ui_scale; // changes scale
-        let h_pts = screen_dimensions.1 as f32 / self.ui_scale; // changes scale
-        self.input.screen_rect = Some(egui::Rect::from_two_pos(
-            egui::pos2(0.0, 0.0),
-            egui::pos2(w_pts, h_pts),
-        ));
-        self.input.pixels_per_point = Some(self.ui_scale); // changes draw res
-
-        self.fire_egui_events(&sdl_events, clipboard_util); // changes input mapping
-
-        self.ctx.begin_frame(self.input.clone());
-    }
-
-    pub fn end_frame(
-        &mut self,
-    ) -> (
-        Vec<egui::ClippedPrimitive>,
-        egui::TexturesDelta,
-        egui::PlatformOutput,
-    ) {
-        let full_output = self.ctx.end_frame();
-        let clipped_prims = self.ctx.tessellate(full_output.shapes);
-        let texs_delta = full_output.textures_delta;
-
-        self.input.events.clear();
-        (clipped_prims, texs_delta, full_output.platform_output)
-    }
-
     pub fn wants_keyboard_input(&self) -> bool {
-        self.ctx.wants_keyboard_input()
-    }
-
-    pub fn get_ui_scale(&self) -> f32 {
-        self.ui_scale
+        self.egui_core.ctx.wants_keyboard_input()
     }
 
     pub fn draw(
         &mut self,
-        screen_dimension: (u32, u32),
+        screen_dimensions: (u32, u32),
         logger: &Arc<RwLock<Vec<DebugLogRecord>>>,
-        console_commands: &mut BTreeMap<String, ConsoleCommand>,
     ) {
         // setup visuals
         self.visuals.window_fill =
             Color32::from_rgba_unmultiplied(BG_COLOUR.r(), BG_COLOUR.g(), BG_COLOUR.b(), {
                 (self.ui_opacity * 255.0) as u8
             });
-        self.ctx.set_visuals(self.visuals.clone());
+        self.egui_core.ctx.set_visuals(self.visuals.clone());
 
-        let w = screen_dimension.0 as f32 / self.ui_scale;
-        let _h = screen_dimension.1 as f32 / self.ui_scale;
+        let w = screen_dimensions.0 as f32 / self.ui_scale;
+        let _h = screen_dimensions.1 as f32 / self.ui_scale;
         let banner_bg =
             Color32::from_rgba_unmultiplied(BG_COLOUR.r(), BG_COLOUR.g(), BG_COLOUR.b(), 128);
 
         // draw banner
         egui::TopBottomPanel::top("egui_debug_ui_top_panel")
             .frame(egui::Frame::none())
-            .show(&self.ctx, |ui| {
+            .show(&self.egui_core.ctx, |ui| {
                 let painter = ui.painter();
                 painter.rect(
                     egui::Rect::from_two_pos(
@@ -426,7 +260,7 @@ impl EguiDebugUi {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none())
-            .show(&self.ctx, |_| {
+            .show(&self.egui_core.ctx, |_| {
                 // draw log record windows
                 let record_wnds = self.record_windows.take().unwrap();
                 let mut keep_wnds = BTreeMap::new();
@@ -437,7 +271,7 @@ impl EguiDebugUi {
                             .open(&mut wnd.is_open)
                             .default_size([320.0, 0.0])
                             .min_height(210.0)
-                            .show(&self.ctx, |ui| {
+                            .show(&self.egui_core.ctx, |ui| {
                                 egui::TopBottomPanel::bottom(ui.next_auto_id())
                                     .frame(Frame::none())
                                     .show_inside(ui, |ui| {
@@ -505,6 +339,7 @@ impl EguiDebugUi {
                                     .frame(Frame::none())
                                     .show_inside(ui, |ui| {
                                         ui.set_clip_rect(ui.available_rect_before_wrap());
+                                        let w = ui.available_width();
                                         egui::ScrollArea::both()
                                             .id_source("log_message_scroll_area")
                                             .auto_shrink([false, false])
@@ -512,6 +347,18 @@ impl EguiDebugUi {
                                             .show(ui, |ui| {
                                                 if egui::TextEdit::multiline(&mut wnd.fake_text)
                                                 .frame(false)
+                                                .layouter(&mut |ui, text, _| {
+                                                    let mut lj = LayoutJob::default();
+                                                    let mut wrapping = TextWrapping::default();
+                                                    wrapping.max_width = if wnd.wrap_text {
+                                                        w
+                                                    } else {
+                                                        f32::INFINITY
+                                                    };
+                                                    lj.wrap = wrapping;
+                                                    lj.append(text, 0.0, TextFormat::simple(FontId::monospace(12.0), TEXT_COLOUR));
+                                                    ui.fonts(|f| f.layout_job(lj))
+                                                })
                                                 .code_editor()
                                                 .show(ui).response.changed() {
                                                     // fake text lets us keep this selectable
@@ -519,6 +366,7 @@ impl EguiDebugUi {
                                                     // as the text can be changed for a frame or two, but it works
                                                     wnd.fake_text = wnd.record.text.clone();
                                                 }
+                                                wnd.wrap_text
                                             });
                                     });
                             });
@@ -529,10 +377,21 @@ impl EguiDebugUi {
 
                 self.record_windows = Some(keep_wnds);
 
+                // draw debug windows
+                for (_, (is_open, wnd)) in &mut self.debug_windows {
+                    if *is_open {
+                        egui::Window::new("aaaaaa")
+                            .show(&self.egui_core.ctx, |ui| {
+                                wnd.draw(ui);
+                            });
+                    }
+                }
+
+                // draw console
                 egui::Window::new("k9 console")
                     .default_size([640.0, 320.0])
                     .min_height(100.0)
-                    .show(&self.ctx, |ui| {
+                    .show(&self.egui_core.ctx, |ui| {
                         egui::TopBottomPanel::bottom("k9_console_text_entry_panel")
                             .frame(egui::Frame::none())
                             .show_inside(ui, |ui| {
@@ -804,7 +663,7 @@ impl EguiDebugUi {
                                         // gather predictions
                                         let mut prev_index = None;
                                         let mut it = 0;
-                                        for cmd in console_commands.iter() {
+                                        for cmd in self.console_commands.iter() {
                                             if cmd.0.starts_with(&self.console_text) {
                                                 self.preview_autocomplete_cmds.push(cmd.0.clone());
                                                 if let Some((name, _)) = &prev_selected {
@@ -893,7 +752,7 @@ impl EguiDebugUi {
                                                             };
 
                                                         if let Some(cmd) =
-                                                            console_commands.get_mut(&command)
+                                                            self.console_commands.get_mut(&command)
                                                         {
                                                             let mut error = false;
 
@@ -968,7 +827,7 @@ impl EguiDebugUi {
                                                             }
 
                                                             if !error {
-                                                                if let Err(e) = (cmd.cb)(complete_args) {
+                                                                if let Err(e) = (cmd.cb)(ConsoleCommandInterface { debug_windows: &mut self.debug_windows }, complete_args) {
                                                                     log::error!("command error: {e}");
                                                                 }
                                                             }
@@ -982,9 +841,9 @@ impl EguiDebugUi {
                                                         }
 
                                                         if let Some(cmd) =
-                                                            console_commands.get_mut(&command)
+                                                            self.console_commands.get_mut(&command)
                                                         {
-                                                            if let Err(e) = (cmd.cb)(BTreeMap::new()) {
+                                                            if let Err(e) = (cmd.cb)(ConsoleCommandInterface { debug_windows: &mut self.debug_windows }, BTreeMap::new()) {
                                                                 log::error!("command error: {e}");
                                                             }
                                                         } else {
@@ -1148,616 +1007,20 @@ impl EguiDebugUi {
             });
     }
 
-    pub fn handle_platform_output(
-        &mut self,
-        output: egui::PlatformOutput,
-        clipboard_util: &ClipboardUtil,
-    ) {
-        // handle clipboard
-        if !output.copied_text.is_empty() {
-            if let Err(e) = clipboard_util.set_clipboard_text(&output.copied_text) {
-                log::error!("couldn't set clipboard text: {e}");
-            }
-        }
-
-        // handle cursor
-        type EguiCursor = egui::CursorIcon;
-        type SdlCursor = sdl2::sys::SDL_SystemCursor;
-        let sys_cursor = match output.cursor_icon {
-            EguiCursor::ResizeEast
-            | EguiCursor::ResizeWest
-            | EguiCursor::ResizeColumn
-            | EguiCursor::ResizeHorizontal => SdlCursor::SDL_SYSTEM_CURSOR_SIZEWE,
-            EguiCursor::ResizeNorth
-            | EguiCursor::ResizeSouth
-            | EguiCursor::ResizeRow
-            | EguiCursor::ResizeVertical => SdlCursor::SDL_SYSTEM_CURSOR_SIZENS,
-            EguiCursor::ResizeNeSw | EguiCursor::ResizeNorthEast | EguiCursor::ResizeSouthEast => {
-                SdlCursor::SDL_SYSTEM_CURSOR_SIZENESW
-            }
-            EguiCursor::ResizeNwSe | EguiCursor::ResizeNorthWest | EguiCursor::ResizeSouthWest => {
-                SdlCursor::SDL_SYSTEM_CURSOR_SIZENWSE
-            }
-            EguiCursor::Move | EguiCursor::Crosshair => SdlCursor::SDL_SYSTEM_CURSOR_CROSSHAIR,
-            EguiCursor::AllScroll => SdlCursor::SDL_SYSTEM_CURSOR_SIZEALL,
-            EguiCursor::NoDrop | EguiCursor::NotAllowed => SdlCursor::SDL_SYSTEM_CURSOR_NO,
-            EguiCursor::Progress | EguiCursor::Wait => SdlCursor::SDL_SYSTEM_CURSOR_WAIT,
-            EguiCursor::Text | EguiCursor::VerticalText => SdlCursor::SDL_SYSTEM_CURSOR_IBEAM,
-            EguiCursor::PointingHand => SdlCursor::SDL_SYSTEM_CURSOR_HAND,
-            _ => SdlCursor::SDL_SYSTEM_CURSOR_ARROW,
-        };
-
-        unsafe {
-            let new_cursor = sdl2::sys::SDL_CreateSystemCursor(sys_cursor);
-            sdl2::sys::SDL_SetCursor(new_cursor);
-            if let Some(old_cursor) = self.sdl_cursor.take() {
-                sdl2::sys::SDL_FreeCursor(old_cursor);
-            }
-            self.sdl_cursor = Some(new_cursor);
-        }
-    }
-
-    fn paint_primitives(
-        &mut self,
-        glow: &glow::Context,
-        screen_size_px: (u32, u32),
-        screen_scale: f32,
-        clipped_primitives: Vec<egui::ClippedPrimitive>,
-    ) {
-        self.prepare_painting(glow, screen_size_px, screen_scale);
-
-        for egui::ClippedPrimitive {
-            clip_rect,
-            primitive,
-        } in clipped_primitives
-        {
-            self.set_clip_rect(glow, screen_size_px, screen_scale, clip_rect);
-
-            match primitive {
-                Primitive::Mesh(mesh) => {
-                    self.paint_mesh(glow, mesh);
-                }
-                Primitive::Callback(callback) => {
-                    if callback.rect.is_positive() {
-                        // Transform callback rect to physical pixels:
-                        let rect_min_x = screen_scale * callback.rect.min.x;
-                        let rect_min_y = screen_scale * callback.rect.min.y;
-                        let rect_max_x = screen_scale * callback.rect.max.x;
-                        let rect_max_y = screen_scale * callback.rect.max.y;
-
-                        let rect_min_x = rect_min_x.round() as i32;
-                        let rect_min_y = rect_min_y.round() as i32;
-                        let rect_max_x = rect_max_x.round() as i32;
-                        let rect_max_y = rect_max_y.round() as i32;
-
-                        unsafe {
-                            glow.viewport(
-                                rect_min_x,
-                                screen_size_px.1 as i32 - rect_max_y,
-                                rect_max_x - rect_min_x,
-                                rect_max_y - rect_min_y,
-                            );
-                        }
-
-                        let screen_size_px_buff: [u32; 2] = [screen_size_px.0, screen_size_px.1];
-                        let info = egui::PaintCallbackInfo {
-                            viewport: callback.rect,
-                            clip_rect,
-                            pixels_per_point: screen_scale,
-                            screen_size_px: screen_size_px_buff,
-                        };
-
-                        if let Some(callback) = callback.callback.downcast_ref::<CallbackFn>() {
-                            (callback.f)(info, self);
-                        } else {
-                            log::warn!("Warning: Unsupported render callback. Expected CallbackFn");
-                        }
-
-                        // Restore state:
-                        self.prepare_painting(glow, screen_size_px, screen_scale);
-                    }
-                }
-            }
-        }
-        unsafe {
-            glow.bind_vertex_array(None);
-            glow.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
-            glow.disable(glow::SCISSOR_TEST);
-        }
-    }
-
-    fn paint_mesh(&mut self, glow: &glow::Context, mesh: egui::Mesh) {
-        if let Some(texture) = self.textures.get(&mesh.texture_id) {
-            unsafe {
-                let vertices: Vec<EguiVertexPod> = mesh
-                    .vertices
-                    .into_iter()
-                    .map(|e| EguiVertexPod::from(e))
-                    .collect();
-                let vertices_ref: &[u8] = bytemuck::cast_slice(vertices.as_slice());
-                glow.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
-                glow.buffer_data_u8_slice(glow::ARRAY_BUFFER, vertices_ref, glow::STREAM_DRAW);
-
-                glow.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(self.ebo));
-                glow.buffer_data_u8_slice(
-                    glow::ELEMENT_ARRAY_BUFFER,
-                    bytemuck::cast_slice(&mesh.indices),
-                    glow::STREAM_DRAW,
-                );
-
-                glow.bind_texture(glow::TEXTURE_2D, Some(*texture));
-            }
-
-            unsafe {
-                glow.draw_elements(
-                    glow::TRIANGLES,
-                    mesh.indices.len() as i32,
-                    glow::UNSIGNED_INT,
-                    0,
-                );
-            }
-        } else {
-            log::error!("egui failed to find texture {:?}", mesh.texture_id);
-        }
-    }
-
-    fn set_clip_rect(
-        &self,
-        glow: &glow::Context,
-        size_px: (u32, u32),
-        screen_scale: f32,
-        clip_rect: egui::Rect,
-    ) {
-        // Transform clip rect to physical pixels:
-        let clip_min_x = screen_scale * clip_rect.min.x;
-        let clip_min_y = screen_scale * clip_rect.min.y;
-        let clip_max_x = screen_scale * clip_rect.max.x;
-        let clip_max_y = screen_scale * clip_rect.max.y;
-
-        // Round to integer:
-        let clip_min_x = clip_min_x.round() as i32;
-        let clip_min_y = clip_min_y.round() as i32;
-        let clip_max_x = clip_max_x.round() as i32;
-        let clip_max_y = clip_max_y.round() as i32;
-
-        // Clamp:
-        let clip_min_x = clip_min_x.clamp(0, size_px.0 as i32);
-        let clip_min_y = clip_min_y.clamp(0, size_px.1 as i32);
-        let clip_max_x = clip_max_x.clamp(clip_min_x, size_px.0 as i32);
-        let clip_max_y = clip_max_y.clamp(clip_min_y, size_px.1 as i32);
-
-        unsafe {
-            glow.scissor(
-                clip_min_x,
-                size_px.1 as i32 - clip_max_y,
-                clip_max_x - clip_min_x,
-                clip_max_y - clip_min_y,
-            );
-        }
-    }
-
-    fn prepare_painting(&mut self, glow: &glow::Context, (w, h): (u32, u32), screen_scale: f32) {
-        unsafe {
-            glow.enable(glow::SCISSOR_TEST);
-            glow.disable(glow::CULL_FACE);
-            glow.disable(glow::DEPTH_TEST);
-            glow.color_mask(true, true, true, true);
-            glow.enable(glow::BLEND);
-            glow.blend_equation_separate(glow::FUNC_ADD, glow::FUNC_ADD);
-            glow.blend_func_separate(
-                glow::ONE,
-                glow::ONE_MINUS_SRC_ALPHA,
-                glow::ONE_MINUS_DST_ALPHA,
-                glow::ONE,
-            );
-
-            let w_pts = w as f32 / screen_scale;
-            let h_pts = h as f32 / screen_scale;
-
-            glow.viewport(0, 0, w as i32, h as i32);
-            glow.use_program(Some(self.program));
-            glow.uniform_2_f32(Some(&self.u_screen_size), w_pts, h_pts);
-            glow.uniform_1_i32(Some(&self.u_sampler), 0);
-            glow.active_texture(glow::TEXTURE0);
-            glow.bind_vertex_array(Some(self.vao));
-            glow.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(self.ebo));
-        }
-    }
-
-    fn upload_texture_rgb(
-        &mut self,
-        glow: &glow::Context,
-        pos: Option<[usize; 2]>,
-        [w, h]: [usize; 2],
-        options: egui::TextureOptions,
-        data: &[u8],
-    ) {
-        unsafe {
-            glow.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MAG_FILTER,
-                match options.magnification {
-                    egui::TextureFilter::Linear => glow::LINEAR,
-                    egui::TextureFilter::Nearest => glow::NEAREST,
-                } as i32,
-            );
-            glow.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_MIN_FILTER,
-                match options.minification {
-                    egui::TextureFilter::Linear => glow::LINEAR,
-                    egui::TextureFilter::Nearest => glow::NEAREST,
-                } as i32,
-            );
-
-            glow.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_S,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-            glow.tex_parameter_i32(
-                glow::TEXTURE_2D,
-                glow::TEXTURE_WRAP_T,
-                glow::CLAMP_TO_EDGE as i32,
-            );
-
-            glow.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-
-            if let Some([x, y]) = pos {
-                glow.tex_sub_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    x as _,
-                    y as _,
-                    w as _,
-                    h as _,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(data),
-                );
-            } else {
-                glow.tex_image_2d(
-                    glow::TEXTURE_2D,
-                    0,
-                    glow::RGBA8 as _,
-                    w as _,
-                    h as _,
-                    0,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    Some(data),
-                );
-            }
-        }
-    }
-
     pub fn render(
         &mut self,
         glow: &glow::Context,
-        screen_dimensions: (u32, u32),
-        screen_scale: f32,
-        clipped_primitives: Vec<egui::ClippedPrimitive>,
-        textures_delta: egui::TexturesDelta,
-    ) {
-        // set textures
-        for (id, delta) in textures_delta.set {
-            let tex = *self
-                .textures
-                .entry(id)
-                .or_insert_with(|| unsafe { glow.create_texture().unwrap() });
-            unsafe {
-                glow.bind_texture(glow::TEXTURE_2D, Some(tex));
-            }
-            match &delta.image {
-                egui::ImageData::Color(image) => {
-                    let data: Vec<EguiColor32Pod> = image
-                        .pixels
-                        .iter()
-                        .map(|e| EguiColor32Pod::from(*e))
-                        .collect();
-
-                    let data_ref: &[u8] = bytemuck::cast_slice(data.as_slice());
-                    self.upload_texture_rgb(glow, delta.pos, image.size, delta.options, data_ref);
-                }
-                egui::ImageData::Font(image) => {
-                    let data: Vec<u8> = image
-                        .srgba_pixels(None)
-                        .flat_map(|a| a.to_array())
-                        .collect();
-                    self.upload_texture_rgb(glow, delta.pos, image.size, delta.options, &data);
-                }
-            }
-        }
-
-        self.paint_primitives(glow, screen_dimensions, screen_scale, clipped_primitives);
-
-        // free textures
-        for id in textures_delta.free {
-            if let Some(tex) = self.textures.remove(&id) {
-                unsafe {
-                    glow.delete_texture(tex);
-                }
-            }
-        }
-    }
-
-    fn fire_egui_events(
-        &mut self,
         sdl_events: &Vec<sdl2::event::Event>,
         clipboard_util: &ClipboardUtil,
+        screen_dimensions: (u32, u32),
+        window_has_focus: bool,
+        logger: &Arc<RwLock<Vec<DebugLogRecord>>>,
     ) {
-        let egui_modifiers = self.modifiers.get_modifiers();
-        self.input.modifiers = egui_modifiers;
-
-        for event in sdl_events {
-            match event {
-                sdl2::event::Event::MouseButtonDown {
-                    timestamp: _,
-                    window_id: _,
-                    which: _,
-                    mouse_btn,
-                    clicks: _,
-                    x,
-                    y,
-                } => {
-                    if *mouse_btn == sdl2::mouse::MouseButton::Unknown {
-                        log::warn!("egui debug ui unknown mouse button");
-                        continue;
-                    }
-
-                    let pos = egui::pos2(*x as f32 / self.ui_scale, *y as f32 / self.ui_scale);
-                    self.input.events.push(egui::Event::PointerButton {
-                        pos,
-                        button: match mouse_btn {
-                            sdl2::mouse::MouseButton::Left => egui::PointerButton::Primary,
-                            sdl2::mouse::MouseButton::Right => egui::PointerButton::Secondary,
-                            sdl2::mouse::MouseButton::Middle => egui::PointerButton::Middle,
-                            sdl2::mouse::MouseButton::X1 => egui::PointerButton::Extra1,
-                            sdl2::mouse::MouseButton::X2 => egui::PointerButton::Extra2,
-                            sdl2::mouse::MouseButton::Unknown => panic!(),
-                        },
-                        pressed: true,
-                        modifiers: egui_modifiers,
-                    });
-                }
-                sdl2::event::Event::MouseButtonUp {
-                    timestamp: _,
-                    window_id: _,
-                    which: _,
-                    mouse_btn,
-                    clicks: _,
-                    x,
-                    y,
-                } => {
-                    if *mouse_btn == sdl2::mouse::MouseButton::Unknown {
-                        continue;
-                    }
-
-                    let pos = egui::pos2(*x as f32 / self.ui_scale, *y as f32 / self.ui_scale);
-                    self.input.events.push(egui::Event::PointerButton {
-                        pos,
-                        button: match mouse_btn {
-                            sdl2::mouse::MouseButton::Left => egui::PointerButton::Primary,
-                            sdl2::mouse::MouseButton::Right => egui::PointerButton::Secondary,
-                            sdl2::mouse::MouseButton::Middle => egui::PointerButton::Middle,
-                            sdl2::mouse::MouseButton::X1 => egui::PointerButton::Extra1,
-                            sdl2::mouse::MouseButton::X2 => egui::PointerButton::Extra2,
-                            sdl2::mouse::MouseButton::Unknown => panic!(),
-                        },
-                        pressed: false,
-                        modifiers: egui_modifiers,
-                    });
-                }
-                sdl2::event::Event::MouseMotion {
-                    timestamp: _,
-                    window_id: _,
-                    which: _,
-                    mousestate: _,
-                    x,
-                    y,
-                    xrel: _,
-                    yrel: _,
-                } => {
-                    self.mouse_pos = egui::pos2(*x as f32, *y as f32);
-                    let tf_mouse_pos =
-                        egui::pos2(*x as f32 / self.ui_scale, *y as f32 / self.ui_scale);
-                    self.input
-                        .events
-                        .push(egui::Event::PointerMoved(tf_mouse_pos));
-                }
-                sdl2::event::Event::MouseWheel {
-                    timestamp: _,
-                    window_id: _,
-                    which: _,
-                    x,
-                    y,
-                    direction: _,
-                } => {
-                    if self.modifiers.control {
-                        self.input.events.push(egui::Event::Zoom(*y as f32));
-                    } else {
-                        let scroll: egui::Vec2 = SCROLL_SCALE * egui::vec2(-*x as f32, *y as f32);
-                        self.input.events.push(egui::Event::Scroll(scroll));
-                    }
-                }
-                sdl2::event::Event::KeyDown {
-                    timestamp: _,
-                    window_id: _,
-                    keycode,
-                    scancode: _,
-                    keymod: _,
-                    repeat,
-                } => {
-                    if let Some(kc) = keycode {
-                        match kc {
-                            sdl2::keyboard::Keycode::LShift | sdl2::keyboard::Keycode::RShift => {
-                                self.modifiers.set_shift()
-                            }
-                            sdl2::keyboard::Keycode::LCtrl | sdl2::keyboard::Keycode::RCtrl => {
-                                self.modifiers.set_control()
-                            }
-                            sdl2::keyboard::Keycode::LAlt | sdl2::keyboard::Keycode::RAlt => {
-                                self.modifiers.set_alt()
-                            }
-                            sdl2::keyboard::Keycode::X => {
-                                if self.modifiers.control {
-                                    self.input.events.push(egui::Event::Cut);
-                                } else {
-                                    self.input.events.push(egui::Event::Key {
-                                        key: egui::Key::X,
-                                        pressed: true,
-                                        repeat: *repeat,
-                                        modifiers: egui_modifiers,
-                                    });
-                                }
-                            }
-                            sdl2::keyboard::Keycode::C => {
-                                if self.modifiers.control {
-                                    self.input.events.push(egui::Event::Copy);
-                                } else {
-                                    self.input.events.push(egui::Event::Key {
-                                        key: egui::Key::C,
-                                        pressed: true,
-                                        repeat: *repeat,
-                                        modifiers: egui_modifiers,
-                                    });
-                                }
-                            }
-                            sdl2::keyboard::Keycode::V => {
-                                if self.modifiers.control {
-                                    self.input.events.push(egui::Event::Paste({
-                                        match clipboard_util.clipboard_text() {
-                                            Ok(x) => x.clone(),
-                                            Err(e) => {
-                                                log::error!("couldn't get clipboard text: {e}");
-                                                "".to_owned()
-                                            }
-                                        }
-                                    }));
-                                } else {
-                                    self.input.events.push(egui::Event::Key {
-                                        key: egui::Key::V,
-                                        pressed: true,
-                                        repeat: *repeat,
-                                        modifiers: egui_modifiers,
-                                    });
-                                }
-                            }
-                            sdl2::keyboard::Keycode::D => {
-                                if self.modifiers.control && self.console_has_focus {
-                                    self.delete_console_text = true;
-                                } else {
-                                    self.input.events.push(egui::Event::Key {
-                                        key: egui::Key::D,
-                                        pressed: true,
-                                        repeat: *repeat,
-                                        modifiers: egui_modifiers,
-                                    });
-                                }
-                            }
-                            kc => {
-                                if let Some(ekey) = sdl_keycode_to_egui_key(kc) {
-                                    self.input.events.push(egui::Event::Key {
-                                        key: ekey,
-                                        pressed: true,
-                                        repeat: *repeat,
-                                        modifiers: egui_modifiers,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                sdl2::event::Event::KeyUp {
-                    timestamp: _,
-                    window_id: _,
-                    keycode,
-                    scancode: _,
-                    keymod: _,
-                    repeat,
-                } => {
-                    if let Some(kc) = keycode {
-                        match kc {
-                            sdl2::keyboard::Keycode::LShift | sdl2::keyboard::Keycode::RShift => {
-                                self.modifiers.unset_shift()
-                            }
-                            sdl2::keyboard::Keycode::LCtrl | sdl2::keyboard::Keycode::RCtrl => {
-                                self.modifiers.unset_control()
-                            }
-                            sdl2::keyboard::Keycode::LAlt | sdl2::keyboard::Keycode::RAlt => {
-                                self.modifiers.unset_alt()
-                            }
-                            kc => {
-                                if let Some(ekey) = sdl_keycode_to_egui_key(kc) {
-                                    self.input.events.push(egui::Event::Key {
-                                        key: ekey,
-                                        pressed: false,
-                                        repeat: *repeat,
-                                        modifiers: egui_modifiers,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                }
-                sdl2::event::Event::TextInput {
-                    timestamp: _,
-                    window_id: _,
-                    text,
-                } => {
-                    self.input.events.push(egui::Event::Text(text.clone()));
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-struct ModifierTracker {
-    shift: bool,
-    control: bool,
-    alt: bool,
-}
-impl ModifierTracker {
-    pub fn new() -> Self {
-        Self {
-            shift: false,
-            control: false,
-            alt: false,
-        }
-    }
-    pub fn get_modifiers(&self) -> egui::Modifiers {
-        let mut mods = egui::Modifiers::NONE;
-        if self.shift {
-            mods = mods.plus(egui::Modifiers::SHIFT);
-        }
-        if self.control {
-            mods = mods
-                .plus(egui::Modifiers::CTRL)
-                .plus(egui::Modifiers::COMMAND);
-        }
-        if self.alt {
-            mods = mods.plus(egui::Modifiers::ALT);
-        }
-        mods
-    }
-    pub fn set_shift(&mut self) {
-        self.shift = true;
-    }
-    pub fn unset_shift(&mut self) {
-        self.shift = false;
-    }
-    pub fn set_control(&mut self) {
-        self.control = true;
-    }
-    pub fn unset_control(&mut self) {
-        self.control = false;
-    }
-    pub fn set_alt(&mut self) {
-        self.alt = true;
-    }
-    pub fn unset_alt(&mut self) {
-        self.alt = false;
+        self.egui_core.begin_frame(window_has_focus, sdl_events, screen_dimensions, clipboard_util);
+        self.draw(screen_dimensions, logger);
+        let (primitives, tex_delta, plat_output) = self.egui_core.end_frame();
+        self.egui_core.handle_platform_output(plat_output, clipboard_util);
+        self.egui_core.render(glow, screen_dimensions, primitives, tex_delta);
     }
 }
 
@@ -1824,90 +1087,6 @@ fn debug_ui_offset_date_time_format(time: &OffsetDateTime) -> String {
     )
 }
 
-fn sdl_keycode_to_egui_key(keycode: &sdl2::keyboard::Keycode) -> Option<egui::Key> {
-    // while I could do some range mapping and treat these enums as integers (last I checked they are),
-    // I'm going to assume that they're not and instead explicitly create the mappings.
-    // todo: if speed becomes an issue here, optimize this to integers
-    type A = sdl2::keyboard::Keycode;
-    type B = egui::Key;
-    match keycode {
-        A::A => Some(B::A),
-        A::B => Some(B::B),
-        A::C => Some(B::C),
-        A::D => Some(B::D),
-        A::E => Some(B::E),
-        A::F => Some(B::F),
-        A::G => Some(B::G),
-        A::H => Some(B::H),
-        A::I => Some(B::I),
-        A::J => Some(B::J),
-        A::K => Some(B::K),
-        A::L => Some(B::L),
-        A::M => Some(B::M),
-        A::N => Some(B::N),
-        A::O => Some(B::O),
-        A::P => Some(B::P),
-        A::Q => Some(B::Q),
-        A::R => Some(B::R),
-        A::S => Some(B::S),
-        A::T => Some(B::T),
-        A::U => Some(B::U),
-        A::V => Some(B::V),
-        A::W => Some(B::W),
-        A::X => Some(B::X),
-        A::Y => Some(B::Y),
-        A::Z => Some(B::Z),
-        A::Num0 => Some(B::Num0),
-        A::Num1 => Some(B::Num1),
-        A::Num2 => Some(B::Num2),
-        A::Num3 => Some(B::Num3),
-        A::Num4 => Some(B::Num4),
-        A::Num5 => Some(B::Num5),
-        A::Num6 => Some(B::Num6),
-        A::Num7 => Some(B::Num7),
-        A::Num8 => Some(B::Num8),
-        A::Num9 => Some(B::Num9),
-        A::F1 => Some(B::F1),
-        A::F2 => Some(B::F2),
-        A::F3 => Some(B::F3),
-        A::F4 => Some(B::F4),
-        A::F5 => Some(B::F5),
-        A::F6 => Some(B::F6),
-        A::F7 => Some(B::F7),
-        A::F8 => Some(B::F8),
-        A::F9 => Some(B::F9),
-        A::F10 => Some(B::F10),
-        A::F11 => Some(B::F11),
-        A::F12 => Some(B::F12),
-        A::F13 => Some(B::F13),
-        A::F14 => Some(B::F14),
-        A::F15 => Some(B::F15),
-        A::F16 => Some(B::F16),
-        A::F17 => Some(B::F17),
-        A::F18 => Some(B::F18),
-        A::F19 => Some(B::F19),
-        A::F20 => Some(B::F20),
-        A::Up => Some(B::ArrowUp),
-        A::Down => Some(B::ArrowDown),
-        A::Left => Some(B::ArrowLeft),
-        A::Right => Some(B::ArrowRight),
-        A::PageUp => Some(B::PageUp),
-        A::PageDown => Some(B::PageDown),
-        A::AltErase | A::Backspace => Some(B::Backspace),
-        A::Delete => Some(B::Delete),
-        A::End => Some(B::End),
-        A::Return | A::Return2 | A::KpEnter => Some(B::Enter),
-        A::Home => Some(B::Home),
-        A::Insert => Some(B::Insert),
-        A::Escape => Some(B::Escape),
-        A::Minus => Some(B::Minus),
-        A::Plus => Some(B::PlusEquals),
-        A::Space => Some(B::Space),
-        A::Tab => Some(B::Tab),
-        _ => None,
-    }
-}
-
 #[derive(Clone)]
 pub struct DebugLogRecord {
     idx: usize,
@@ -1919,64 +1098,6 @@ pub struct DebugLogRecord {
     module: String,
     target: String,
     local_time: time::OffsetDateTime,
-}
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct EguiVertexPod {
-    pos: egui::Pos2,
-    uv: egui::Pos2,
-    colour: egui::Color32,
-}
-unsafe impl Pod for EguiVertexPod {}
-unsafe impl Zeroable for EguiVertexPod {}
-impl From<egui::epaint::Vertex> for EguiVertexPod {
-    fn from(value: egui::epaint::Vertex) -> Self {
-        Self {
-            pos: value.pos,
-            uv: value.uv,
-            colour: value.color,
-        }
-    }
-}
-impl Default for EguiVertexPod {
-    fn default() -> Self {
-        Self {
-            pos: egui::Pos2::default(),
-            uv: egui::Pos2::default(),
-            colour: egui::Color32::default(),
-        }
-    }
-}
-
-pub struct CallbackFn {
-    f: Box<dyn Fn(PaintCallbackInfo, &EguiDebugUi) + Sync + Send>,
-}
-
-impl CallbackFn {
-    pub fn new<F: Fn(PaintCallbackInfo, &EguiDebugUi) + Sync + Send + 'static>(
-        callback: F,
-    ) -> Self {
-        let f = Box::new(callback);
-        CallbackFn { f }
-    }
-}
-
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct EguiColor32Pod {
-    a: u8,
-    b: u8,
-    c: u8,
-    d: u8,
-}
-unsafe impl Pod for EguiColor32Pod {}
-unsafe impl Zeroable for EguiColor32Pod {}
-impl From<egui::Color32> for EguiColor32Pod {
-    fn from(value: egui::Color32) -> Self {
-        let (a, b, c, d) = value.to_tuple();
-        Self { a, b, c, d }
-    }
 }
 
 fn expand_parse_tree_node(node: &ParseTreeNode) -> String {
@@ -2175,5 +1296,39 @@ fn parse_value_via_definition(
             }
         },
         CallbackArgumentType::Flag => Some(CallbackArgumentValue::Flag(true)),
+    }
+}
+
+pub trait DebugUiWindow {
+    fn draw(&mut self, ui: &mut egui::Ui);
+}
+
+pub struct ConsoleCommandInterface<'a> {
+    debug_windows: &'a mut BTreeMap<String, (bool, Box<dyn DebugUiWindow>)>,
+}
+impl<'a> ConsoleCommandInterface<'a> {
+    pub fn open_debug_window(&mut self, id: &String) -> bool {
+        if let Some((is_open, _)) = self.debug_windows.get_mut(id) {
+            *is_open = true;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn close_debug_window(&mut self, id: &String) -> bool {
+        if let Some((is_open, _)) = self.debug_windows.get_mut(id) {
+            *is_open = false;
+            true
+        } else {
+            false
+        }
+    }
+    pub fn set_open_debug_window(&mut self, id: &String, set_open: bool) -> bool {
+        if let Some((is_open, _)) = self.debug_windows.get_mut(id) {
+            *is_open = set_open;
+            true
+        } else {
+            false
+        }
     }
 }

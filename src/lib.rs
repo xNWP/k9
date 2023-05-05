@@ -18,3 +18,6 @@ pub use uuid;
 pub mod camera;
 pub mod debug_ui;
 pub use k9_proc_macros::console_command;
+
+pub use egui;
+pub use egui_extras;
