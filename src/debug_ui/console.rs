@@ -44,10 +44,14 @@ impl DebugConsole {
         {
             let val = debug_console_commands.clone();
             let cc_debug_console_command =
-                console_command_internal!({ value: bool }, |ccf, value| {
-                    *val.lock().unwrap() = value;
-                    Ok(())
-                });
+                console_command_internal!(
+                    "displays debug information about the parsing run for a console command.",
+                    { value: bool },
+                    |ccf, value| {
+                        *val.lock().unwrap() = value;
+                        Ok(())
+                    }
+                );
             console_commands
                 .entry("k9_debug_console_command".to_owned())
                 .and_modify(|_| {
@@ -872,6 +876,7 @@ pub struct ConsoleCommand {
             + 'static,
     >,
     args: Vec<CallbackArgumentDefinition>,
+    description: String,
 }
 
 #[derive(Debug)]
@@ -911,10 +916,12 @@ impl ConsoleCommand {
             ) -> Result<(), String>
             + 'static,
         args: Vec<CallbackArgumentDefinition>,
+        description: String,
     ) -> Self {
         Self {
             cb: Box::new(cb),
             args,
+            description,
         }
     }
 }

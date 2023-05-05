@@ -163,7 +163,7 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
     // quit command
     {
         let flag = is_finished.clone();
-        let cc = console_command_internal!({}, |_| {
+        let cc = console_command_internal!("exits the application.", {}, |_| {
             *flag.lock().unwrap() = true;
             Ok(())
         });

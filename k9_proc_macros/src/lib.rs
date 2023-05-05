@@ -4,7 +4,7 @@ use proc_macro::{TokenStream, Diagnostic};
 use quote::quote;
 use quote::spanned::Spanned;
 use syn::parse::Parse;
-use syn::{braced, Ident};
+use syn::{braced, Ident, LitStr};
 use syn::{parse_macro_input, Token};
 
 #[proc_macro]
@@ -69,7 +69,7 @@ fn console_command_base(tokens: TokenStream, internal: bool) -> TokenStream {
             args.push({crate_name}::debug_ui::console::CallbackArgumentDefinition {{
                 name: "{0}".to_owned(),
                 cba_type: {1},
-                optional: {2}
+                optional: {2},
             }});
             "#,
             f.name,
@@ -101,10 +101,11 @@ fn console_command_base(tokens: TokenStream, internal: bool) -> TokenStream {
             
             let mut args = Vec::new();
             {args_str}
-            {crate_name}::debug_ui::ConsoleCommand::new(cb, args)
+            {crate_name}::debug_ui::ConsoleCommand::new(cb, args, "{1}".to_owned())
         }}
         "#,
         inner_cb,
+        pi.description,
     );
     //println!("{output_str}");
     output_str.parse().unwrap()
@@ -161,12 +162,17 @@ fn match_callback_arg_value(field: &ParameterParseInfo, crate_name: &str) -> Str
 }
 
 struct ConsoleCommandParseInfo {
+    description: String,
     fields: Vec<ParameterParseInfo>,
     callback: syn::Expr,
 }
 
 impl Parse for ConsoleCommandParseInfo {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let description = input.parse::<LitStr>()?.value();
+
+        let _ = input.parse::<Token![,]>()?;
+
         let fields;
         let _ = braced!(fields in input);
         let fields: Vec<ParameterParseInfo> = fields
@@ -179,7 +185,7 @@ impl Parse for ConsoleCommandParseInfo {
 
         let callback = input.parse::<syn::Expr>()?;
 
-        Ok(Self { fields, callback })
+        Ok(Self { description, fields, callback })
     }
 }
 
