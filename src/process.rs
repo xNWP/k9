@@ -362,18 +362,37 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
     Ok(())
 }
 
-fn debug_callback(_src: u32, ty: u32, _id: u32, severity: u32, msg: &str) {
-    log::error!(
-        "GL CALLBACK: {} type = 0x{:x}, sev = 0x{:x}, message = {:?}",
-        {
-            if ty == glow::DEBUG_TYPE_ERROR {
-                "GL ERROR"
-            } else {
-                ""
-            }
-        },
-        ty,
-        severity,
-        unescaper::unescape(msg).unwrap(),
-    )
+fn debug_callback(_src: u32, ty: u32, id: u32, severity: u32, msg: &str) {
+
+
+    let sev = match severity {
+        glow::DEBUG_SEVERITY_HIGH => "HIGH",
+        glow::DEBUG_SEVERITY_MEDIUM => "MEDIUM",
+        glow::DEBUG_SEVERITY_LOW => "LOW",
+        glow::DEBUG_SEVERITY_NOTIFICATION => "NOTIFICATION",
+        _ => "",
+    };
+
+    match ty {
+        glow::DEBUG_TYPE_ERROR => log::error!("GL CALLBACK: ERROR{{0x{:x}}}, {sev}{{0x{:x}}}, {msg:?}", ty, severity),
+        glow::DEBUG_TYPE_ERROR => log::error!("GL CALLBACK: ERROR{{0x{:x}}}, {sev}{{0x{:x}}}, {msg:?}", ty, severity),
+        _ => {},
+    }
+
+    match severity {
+        glow::DEBUG_SEVERITY_HIGH => log::error!("GL CALLBACK: ")
+    }
+
+    //log::error!(
+    //    "GL CALLBACK: {} type = 0x{:x}, sev = 0x{:x}, message = {:?}",
+    //    {
+    //        match ty {
+    //            glow::DEBUG_TYPE_ERROR =>
+    //            _ => "",
+    //        }
+    //    },
+    //    ty,
+    //    severity,
+    //    unescaper::unescape(msg).unwrap(),
+    //)
 }
