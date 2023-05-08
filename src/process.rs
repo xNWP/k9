@@ -364,7 +364,15 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
     Ok(())
 }
 
-fn debug_callback(_src: u32, ty: u32, id: u32, severity: u32, msg: &str) {
+const DEBUG_CALLBACK_ID_BLACKLIST: [u32; 1] = [
+    0x20071,
+];
+
+fn debug_callback(src: u32, ty: u32, id: u32, severity: u32, msg: &str) {
+    if DEBUG_CALLBACK_ID_BLACKLIST.contains(&id) {
+        return;
+    }
+
     let sev_str = match severity {
         glow::DEBUG_SEVERITY_HIGH => "HIGH",
         glow::DEBUG_SEVERITY_MEDIUM => "MEDIUM",
@@ -386,7 +394,17 @@ fn debug_callback(_src: u32, ty: u32, id: u32, severity: u32, msg: &str) {
         _ => "",
     };
 
-    let msg = format!("GL CALLBACK: id{{0x{id:x}}}, src {type_str}{{0x{ty:x}}}, {sev_str}{{0x{severity:x}}}, {:?}", unescaper::unescape(msg).unwrap());
+    let src_str = match src {
+        glow::DEBUG_SOURCE_API =>  "API",
+        glow::DEBUG_SOURCE_APPLICATION => "APPLICATION",
+        glow::DEBUG_SOURCE_OTHER => "OTHER",
+        glow::DEBUG_SOURCE_SHADER_COMPILER => "SHADER_COMPILER",
+        glow::DEBUG_SOURCE_THIRD_PARTY => "THIRD_PARTY",
+        glow::DEBUG_SOURCE_WINDOW_SYSTEM => "WINDOW_SYSTEM",
+        _ => "",
+    };
+
+    let msg = format!("GL CALLBACK:\n  ID: {{0x{id:x}}}\n  SOURCE: {src_str}{{0x{src:x}}}\n  TYPE: {type_str}{{0x{ty:x}}}\n  SEVERITY: {sev_str}{{0x{severity:x}}}\n  {:?}", unescaper::unescape(msg).unwrap());
     match severity {
         glow::DEBUG_SEVERITY_HIGH => log::error!("{msg}"),
         glow::DEBUG_SEVERITY_MEDIUM => log::warn!("{msg}"),
