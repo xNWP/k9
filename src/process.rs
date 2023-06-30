@@ -279,6 +279,7 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
         let mut throttle_timer = Instant::now();
 
         // handle max_fps / throttling
+        // todo, this shit sucks and is hardly effective, tune this or find a different method of doing this.
         let min_frame_time_micros = 1_000_000 / args.max_fps as i128;
         let last_micros = unsafe { frame_profile.last().unwrap_unchecked().as_micros() as i128 };
 
@@ -364,12 +365,12 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
     Ok(())
 }
 
-const DEBUG_CALLBACK_ID_BLACKLIST: [u32; 1] = [
+const DEBUG_CALLBACK_ID_BLOCKLIST: [u32; 1] = [
     0x20071,
 ];
 
 fn debug_callback(src: u32, ty: u32, id: u32, severity: u32, msg: &str) {
-    if DEBUG_CALLBACK_ID_BLACKLIST.contains(&id) {
+    if DEBUG_CALLBACK_ID_BLOCKLIST.contains(&id) {
         return;
     }
 

@@ -231,36 +231,36 @@ impl DebugConsole {
                     .frame(egui::Frame::none())
                     .show_inside(ui, |ui| {
                         // handle autocomplete tab/right arrow complete
-                        ui.input_mut(|input| {
-                            // ArrowRight autocomplete
-                            if input.key_pressed(egui::Key::ArrowRight) {
-                                if let Some((cmd_text, _)) = &self.selected_autocomplete_cmd {
-                                    if self.last_cursor_idx == self.console_text.len() { // at end
-                                        self.console_text = cmd_text.clone();
-                                        self.preview_autocomplete_cmds.clear();
-                                        self.draw_preview_commands_list = false;
-    
-                                        input.events.push(egui::Event::Key {
-                                            key: egui::Key::ArrowRight,
-                                            pressed: true,
-                                            repeat: false,
-                                            modifiers: egui::Modifiers::CTRL,
-                                        });
+                        if self.console_has_focus {
+                            ui.input_mut(|input| {
+                                // ArrowRight autocomplete
+                                if input.key_pressed(egui::Key::ArrowRight) {
+                                    if let Some((cmd_text, _)) = &self.selected_autocomplete_cmd {
+                                        if self.last_cursor_idx == self.console_text.len() { // at end
+                                            self.console_text = cmd_text.clone();
+                                            self.preview_autocomplete_cmds.clear();
+                                            self.draw_preview_commands_list = false;
+        
+                                            input.events.push(egui::Event::Key {
+                                                key: egui::Key::ArrowRight,
+                                                pressed: true,
+                                                repeat: false,
+                                                modifiers: egui::Modifiers::CTRL,
+                                            });
+                                        }
                                     }
                                 }
-                            }
 
-                            // Ctrl+D delete
-                            if input.consume_key(egui::Modifiers::CTRL, egui::Key::D) {
-                                self.console_text.clear();
-                                self.selected_autocomplete_cmd = None;
-                                self.draw_preview_commands_list = false;
-                                self.preview_autocomplete_cmds.clear();
-                            }
+                                // Ctrl+D delete
+                                if input.consume_key(egui::Modifiers::CTRL, egui::Key::D) {
+                                    self.console_text.clear();
+                                    self.selected_autocomplete_cmd = None;
+                                    self.draw_preview_commands_list = false;
+                                    self.preview_autocomplete_cmds.clear();
+                                }
 
-                            // Tab autocomplete
-                            if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
-                                if self.console_has_focus {
+                                // Tab autocomplete
+                                if input.consume_key(egui::Modifiers::NONE, egui::Key::Tab) {
                                     if self.selected_autocomplete_cmd.is_none() && !self.preview_autocomplete_cmds.is_empty() {
                                         log::debug!("probably never runs, TODO: get rid of this if this is true");
                                         self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[0].clone(), 0));
@@ -288,8 +288,8 @@ impl DebugConsole {
                                         }
                                     }
                                 }
-                            }
-                        });
+                            });
+                        }
 
                         // draw console command text edit entry
                         ui.add_space(6.0);
@@ -479,6 +479,11 @@ impl DebugConsole {
 
                         // autocomplete logic
                         if te_resp.changed() {
+                            match self.parse_command() {
+                                Ok((cmd, args)) => {},
+                                Err(e) => log::debug!("{e:?}"),
+                            }
+
                             let prev_selected = self.selected_autocomplete_cmd.take();
                             self.preview_autocomplete_cmds.clear();
 
@@ -512,185 +517,16 @@ impl DebugConsole {
                         if te_resp.lost_focus() {
                             ui.input(|input| {
                                 if input.key_pressed(egui::Key::Enter) {
-                                    {
-                                        let debug_log = *self.debug_console_commands.lock().unwrap();
+                                    log::info!("Execute: {}", self.console_text.trim());
 
-                                        self.console_text =
-                                            self.console_text.trim().to_owned();
-
-                                        let parse_tree = {
-                                            if debug_log {
-                                                log::trace!("trying to parse command: {}", self.console_text);
-                                            }
-
-                                            let mut parse_trees = self
-                                                .command_grammar
-                                                .parse_input(&self.console_text);
-
-                                            let mut val = None;
-                                            let mut pt_count = 0;
-
-                                            let mut debug_msg = "== Parse Trees ==".to_owned();
-                                            while let Some(pt) = parse_trees.next() {
-                                                if debug_log {
-                                                    debug_msg += &format!("\n{pt_count} =>\n{pt}");
-                                                }
-                                                val = Some(pt);
-                                                pt_count += 1;
-                                            }
-
-                                            if debug_log {
-                                                log::trace!("{debug_msg}");
-                                            }
-
-                                            if pt_count != 1 {
-                                                log::error!("ambigious command, multiple valid parse trees.");
-                                                val = None;
-                                            }
-
-                                            val
-                                        };
-
-                                        if let Some(pt) = parse_tree {
-                                            let mut nodes = pt.rhs_iter();
-                                            let command = expand_parse_tree_node(
-                                                nodes.next().unwrap(),
-                                            );
-
-                                            if debug_log {
-                                                log::trace!("Parsed Command: {command}");
-                                            }
-
-                                            if nodes.next().is_some() { // whitespace, args follow
-                                                let args_node = nodes.next().unwrap();
-                                                let args =
-                                                    if let ParseTreeNode::Nonterminal(nt) =
-                                                        args_node
-                                                    {
-                                                        expand_command_parameters(nt)
-                                                    } else {
-                                                        panic!(
-                                                            "unexpected console command parse"
-                                                        );
-                                                    };
-
-                                                if let Some(cmd) =
-                                                    self.console_commands.get_mut(&command)
-                                                {
-                                                    let mut error = false;
-
-                                                    // collect named args, indexed args, and flags*
-                                                    // *flags are actually just named values set to true
-                                                    let mut named_args = BTreeMap::new();
-                                                    let mut indexed_vals = VecDeque::new();
-                                                    for arg in args {
-                                                        if arg.0.is_empty() {
-                                                            indexed_vals.push_back(arg.1);
-                                                        } else {
-                                                            let name = arg.0.clone();
-                                                            if named_args.insert(arg.0, arg.1).is_some() {
-                                                                log::error!("duplicate command parameter: {name}");
-                                                                error = true;
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // construct final parameters
-                                                    let mut missed_mandatory = VecDeque::new();
-                                                    let mut missed_optional = VecDeque::new();
-                                                    let mut complete_args = BTreeMap::new();
-                                                    if !error {
-                                                        for def in &cmd.args {
-                                                            if let Some(value) = named_args.remove(&def.name) {
-                                                                let arg_value = parse_value_via_definition(&value, def);
-                                                                if let Some(arg_value) = arg_value {
-                                                                    complete_args.insert(def.name.clone(), arg_value);
-                                                                } else {
-                                                                    error = true;
-                                                                    break;
-                                                                }
-                                                            } else {
-                                                                if let CallbackArgumentType::Flag = def.cba_type { // default missing flags to false
-                                                                    complete_args.insert(def.name.clone(), CallbackArgumentValue::Flag(false));
-                                                                } else {
-                                                                    if def.optional {
-                                                                        missed_optional.push_back(def);
-                                                                    } else {
-                                                                        missed_mandatory.push_back(def);
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    
-                                                    if !error { // match up any indexed_args
-                                                        let mandatory_len = missed_mandatory.len();
-                                                        let mut missed_defs = missed_mandatory;
-                                                        missed_defs.append(&mut missed_optional);
-                                                        let total_len = missed_defs.len();
-
-                                                        let indexed_len = indexed_vals.len();
-                                                        if indexed_len >= mandatory_len {
-                                                            for _ in 0..indexed_len {
-                                                                let indexed_val = indexed_vals.pop_front().unwrap();
-                                                                let missed_def = missed_defs.pop_front().unwrap();
-
-                                                                let arg_value = parse_value_via_definition(&indexed_val, missed_def);
-                                                                if let Some(arg_value) = arg_value {
-                                                                    complete_args.insert(missed_def.name.clone(), arg_value);
-                                                                } else {
-                                                                    log::error!("couldn't parse argument '{indexed_val}' with definition '{missed_def:?}'.");
-                                                                    error = true;
-                                                                    break;
-                                                                }
-                                                            }
-                                                        } else {
-                                                            error = true;
-                                                            if indexed_len > total_len {
-                                                                log::error!("too many arguments.");
-                                                            } else {
-                                                                log::error!("too few arguments.");
-                                                            }
-                                                        }
-                                                    }
-
-                                                    if debug_log {
-                                                        log::trace!("completed arguments =>\n{complete_args:#?}");
-                                                    }
-
-                                                    if !error {
-                                                        if let Err(e) = (cmd.cb)(ConsoleCommandInterface { debug_windows: &mut self.debug_windows }, complete_args) {
-                                                            log::error!("command error: {e}");
-                                                        }
-                                                    }
-                                                } else {
-                                                    log::error!("command not found: {command}");
-                                                }
-                                            } else {
-                                                // no args passed
-                                                if debug_log {
-                                                    log::trace!("no args passed");
-                                                }
-
-                                                if let Some(cmd) =
-                                                    self.console_commands.get_mut(&command)
-                                                {
-                                                    if let Err(e) = (cmd.cb)(ConsoleCommandInterface { debug_windows: &mut self.debug_windows }, BTreeMap::new()) {
-                                                        log::error!("command error: {e}");
-                                                    }
-                                                } else {
-                                                    log::error!("command not found: {command}");
-                                                }
-                                            }
-                                        } else {
-                                            log::error!(
-                                                "invalid console command: {}",
-                                                self.console_text
-                                            );
+                                    match self.parse_command() {
+                                        Ok((cmd, args))
+                                            => match (self.console_commands.get_mut(&cmd).unwrap().cb)(ConsoleCommandInterface { debug_windows: &mut self.debug_windows }, args) {
+                                            Ok(()) => {},
+                                            Err(e) => log::error!("{e}"),
                                         }
+                                        Err(e) => log::error!("command error: {e:?}"),
                                     }
-
                                     self.console_text.clear();
                                     self.set_console_focus = true;
                                     self.selected_autocomplete_cmd = None;
@@ -702,31 +538,33 @@ impl DebugConsole {
                         self.console_has_focus = te_resp.has_focus();
 
                         // handle up/down key navigation logic, includes autocomplete logic and history logic
-                        ui.input_mut(|input| {
-                            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
-                                if let Some((_, it)) = &self.selected_autocomplete_cmd {
-                                    if *it == 0 {
-                                        let len = self.preview_autocomplete_cmds.len();
-                                        self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[len - 1].clone(), len - 1));
+                        if self.console_has_focus {
+                            ui.input_mut(|input| {
+                                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                                    if let Some((_, it)) = &self.selected_autocomplete_cmd {
+                                        if *it == 0 {
+                                            let len = self.preview_autocomplete_cmds.len();
+                                            self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[len - 1].clone(), len - 1));
+                                        } else {
+                                            self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[it - 1].clone(), it - 1));
+                                        }
                                     } else {
-                                        self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[it - 1].clone(), it - 1));
+                                        // todo: history
                                     }
-                                } else {
-                                    // todo: history
                                 }
-                            }
-                            if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
-                                if let Some((_, it)) = &self.selected_autocomplete_cmd {
-                                    if *it as i32 == self.preview_autocomplete_cmds.len() as i32 - 1 { // cast to handle underflow
-                                        self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[0].clone(), 0));
+                                if input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                                    if let Some((_, it)) = &self.selected_autocomplete_cmd {
+                                        if *it as i32 == self.preview_autocomplete_cmds.len() as i32 - 1 { // cast to handle underflow
+                                            self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[0].clone(), 0));
+                                        } else {
+                                            self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[it + 1].clone(), it + 1));
+                                        }
                                     } else {
-                                        self.selected_autocomplete_cmd = Some((self.preview_autocomplete_cmds[it + 1].clone(), it + 1));
+                                        // todo: history
                                     }
-                                } else {
-                                    // todo: history
                                 }
-                            }
-                        });
+                            });
+                        }
                     });
 
                 egui::CentralPanel::default()
@@ -865,6 +703,166 @@ impl DebugConsole {
                 self.last_console_window_height = ui.cursor().height();
             });
     }
+
+    fn parse_command(&self) -> Result<(String, BTreeMap<String, CallbackArgumentValue>), ParseCommandErr> {
+        let debug_log = *self.debug_console_commands.lock().unwrap();
+
+        let text = self.console_text.trim().to_owned();
+
+        let parse_tree = {
+            if debug_log {
+                log::trace!("trying to parse command: {}", text);
+            }
+
+            let mut parse_trees = self
+                .command_grammar
+                .parse_input(&text);
+
+            let mut val = None;
+            let mut pt_count = 0;
+
+            let mut debug_msg = "== Parse Trees ==".to_owned();
+            while let Some(pt) = parse_trees.next() {
+                if debug_log {
+                    debug_msg += &format!("\n{pt_count} =>\n{pt}");
+                }
+                val = Some(pt);
+                pt_count += 1;
+            }
+
+            if debug_log {
+                log::trace!("{debug_msg}");
+            }
+
+            if pt_count != 1 {
+                return Err(ParseCommandErr::Ambigious);
+            }
+
+            val
+        };
+
+        if let Some(pt) = parse_tree {
+            let mut nodes = pt.rhs_iter();
+            let command = expand_parse_tree_node(
+                nodes.next().unwrap(),
+            );
+
+            if debug_log {
+                log::trace!("Parsed Command: {command}");
+            }
+
+            if nodes.next().is_some() { // whitespace, args follow
+                let args_node = nodes.next().unwrap();
+                let args = if let ParseTreeNode::Nonterminal(nt) = args_node {
+                    expand_command_parameters(nt)
+                } else {
+                    return Err(ParseCommandErr::Unexpected);
+                };
+
+                if let Some(cmd) = self.console_commands.get(&command) {
+                    // collect named args, indexed args, and flags*
+                    // *flags are actually just named values set to true
+                    let mut named_args = BTreeMap::new();
+                    let mut indexed_vals = VecDeque::new();
+                    for arg in args {
+                        if arg.0.is_empty() {
+                            indexed_vals.push_back(arg.1);
+                        } else {
+                            let name = arg.0.clone();
+                            if named_args.insert(arg.0, arg.1).is_some() {
+                                return Err(ParseCommandErr::DuplicateCommand(name));
+                            }
+                        }
+                    }
+
+                    let total_args = named_args.len() + indexed_vals.len();
+
+                    // construct final parameters
+                    let mut missed_mandatory = VecDeque::new();
+                    let mut missed_optional = VecDeque::new();
+                    let mut complete_args = BTreeMap::new();
+                    
+                    for def in &cmd.args {
+                        if let Some(value) = named_args.remove(&def.name) {
+                            let arg_value = parse_value_via_definition(&value, def);
+                            match arg_value {
+                                Ok(x) => { complete_args.insert(def.name.clone(), x); },
+                                Err(e) => return Err(ParseCommandErr::ValueParseErr(def.name.clone(), e)),
+                            }
+                        } else {
+                            if let CallbackArgumentType::Flag = def.cba_type { // default missing flags to false
+                                complete_args.insert(def.name.clone(), CallbackArgumentValue::Flag(false));
+                            } else {
+                                if def.optional {
+                                    missed_optional.push_back(def);
+                                } else {
+                                    missed_mandatory.push_back(def);
+                                }
+                            }
+                        }
+                    }
+                            
+                    // match up any indexed_args
+                    let mandatory_len = missed_mandatory.len();
+                    let mut missed_defs = missed_mandatory;
+                    missed_defs.append(&mut missed_optional);
+
+                    let indexed_len = indexed_vals.len();
+
+                    if indexed_len >= mandatory_len {
+                        for _ in 0..indexed_len {
+                            let indexed_val = indexed_vals.pop_front().unwrap();
+                            let missed_def = missed_defs.pop_front().unwrap();
+
+                            let arg_value = parse_value_via_definition(&indexed_val, missed_def);
+                            match arg_value {
+                                Ok(x) => { complete_args.insert(missed_def.name.clone(), x); },
+                                Err(e) => return Err(ParseCommandErr::ValueParseErr("Indexed".to_owned(), e)),
+                            }
+                        }
+                    } else {
+                        return Err(ParseCommandErr::InvalidArgCount(total_args, mandatory_len));
+                    }
+
+                    if debug_log {
+                        log::trace!("completed arguments =>\n{complete_args:#?}");
+                    }
+
+                    return Ok((command, complete_args));
+                } else {
+                    return Err(ParseCommandErr::CommandNotFound(command));
+                }
+            } else {
+                // no args passed
+                if debug_log {
+                    log::trace!("no args passed");
+                }
+
+                if let Some(cmd) = self.console_commands.get(&command) {
+                    let mandatory_len = cmd.args.iter().filter_map(|def| if def.optional { None } else { Some(()) }).count();
+                    if mandatory_len != 0 {
+                        return Err(ParseCommandErr::InvalidArgCount(0, mandatory_len));
+                    }
+                    return Ok((command, BTreeMap::new()));
+                } else {
+                    return Err(ParseCommandErr::CommandNotFound(command));
+                }
+            }
+        } else {
+            return Err(ParseCommandErr::Invalid(text));
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ParseCommandErr {
+    Invalid(String),
+    Ambigious,
+    Unexpected,
+    DuplicateCommand(String),
+    ValueParseErr(String, String),
+    InvalidArgCount(usize, usize),
+    CommandNotFound(String),
 }
 
 pub struct ConsoleCommand {
@@ -963,55 +961,50 @@ pub trait DebugUiWindow {
 fn parse_value_via_definition(
     value: &String,
     def: &CallbackArgumentDefinition,
-) -> Option<CallbackArgumentValue> {
+) -> Result<CallbackArgumentValue, String> {
     match def.cba_type {
         CallbackArgumentType::Int32 => match value.parse::<i32>() {
-            Ok(x) => Some(CallbackArgumentValue::Int32(x)),
+            Ok(x) => Ok(CallbackArgumentValue::Int32(x)),
             Err(e) => {
-                log::error!("couldn't parse argument '{}' as a valid i32: {e}", def.name);
-                None
+                return Err(format!("couldn't parse argument '{}' as a valid i32: {e}", def.name));
             }
         },
         CallbackArgumentType::Int64 => match value.parse::<i64>() {
-            Ok(x) => Some(CallbackArgumentValue::Int64(x)),
+            Ok(x) => Ok(CallbackArgumentValue::Int64(x)),
             Err(e) => {
-                log::error!("couldn't parse argument '{}' as a valid i64: {e}", def.name);
-                None
+                return Err(format!("couldn't parse argument '{}' as a valid i64: {e}", def.name));
             }
         },
         CallbackArgumentType::Float32 => match value.parse::<f32>() {
-            Ok(x) => Some(CallbackArgumentValue::Float32(x)),
+            Ok(x) => Ok(CallbackArgumentValue::Float32(x)),
             Err(e) => {
-                log::error!("couldn't parse argument '{}' as a valid f32: {e}", def.name);
-                None
+                return Err(format!("couldn't parse argument '{}' as a valid f32: {e}", def.name));
             }
         },
         CallbackArgumentType::Float64 => match value.parse::<f64>() {
-            Ok(x) => Some(CallbackArgumentValue::Float64(x)),
+            Ok(x) => Ok(CallbackArgumentValue::Float64(x)),
             Err(e) => {
-                log::error!("couldn't parse argument '{}' as a valid f64: {e}", def.name);
-                None
+                return Err(format!("couldn't parse argument '{}' as a valid f64: {e}", def.name));
             }
         },
-        CallbackArgumentType::String => Some(CallbackArgumentValue::String(value.clone())),
+        CallbackArgumentType::String => Ok(CallbackArgumentValue::String(value.clone())),
         CallbackArgumentType::Bool => match value.parse::<bool>() {
-            Ok(x) => Some(CallbackArgumentValue::Bool(x)),
+            Ok(x) => Ok(CallbackArgumentValue::Bool(x)),
             Err(e) => {
                 if value.len() == 1 {
                     if value.starts_with("0") {
-                        return Some(CallbackArgumentValue::Bool(false));
+                        return Ok(CallbackArgumentValue::Bool(false));
                     } else if value.starts_with("1") {
-                        return Some(CallbackArgumentValue::Bool(true));
+                        return Ok(CallbackArgumentValue::Bool(true));
                     }
                 }
-                log::error!(
-                    "couldn't parse argument '{}' as a valid bool: {e}",
+                return Err(format!(
+                    "couldn't parse argument '{}' as a vali)d bool: {e}",
                     def.name
-                );
-                None
+                ));
             }
         },
-        CallbackArgumentType::Flag => Some(CallbackArgumentValue::Flag(true)),
+        CallbackArgumentType::Flag => Ok(CallbackArgumentValue::Flag(true)),
     }
 }
 
