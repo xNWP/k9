@@ -36,7 +36,7 @@ impl EguiRenderCore {
                     panic!("failed to create egui debug ui vert shader: {e}");
                 }
             };
-            const VERT_SRC: &'static str = include_str!("../k9_egui_debug_ui.vert.glsl");
+            const VERT_SRC: &'static str = include_str!("./k9_egui_debug_ui.vert.glsl");
 
             glow.shader_source(vert_shader, VERT_SRC);
             glow.compile_shader(vert_shader);
@@ -53,7 +53,7 @@ impl EguiRenderCore {
                     panic!("failed to create egui debug ui frag shader: {e}");
                 }
             };
-            const FRAG_SRC: &'static str = include_str!("../k9_egui_debug_ui.frag.glsl");
+            const FRAG_SRC: &'static str = include_str!("./k9_egui_debug_ui.frag.glsl");
 
             glow.shader_source(frag_shader, FRAG_SRC);
             glow.compile_shader(frag_shader);
