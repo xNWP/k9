@@ -479,11 +479,6 @@ impl DebugConsole {
 
                         // autocomplete logic
                         if te_resp.changed() {
-                            match self.parse_command() {
-                                Ok((cmd, args)) => {},
-                                Err(e) => log::debug!("{e:?}"),
-                            }
-
                             let prev_selected = self.selected_autocomplete_cmd.take();
                             self.preview_autocomplete_cmds.clear();
 
