@@ -36,7 +36,7 @@ impl DebugConsole {
         mut console_commands: BTreeMap<String, ConsoleCommand>,
         debug_windows: BTreeMap<String, Box<dyn DebugUiWindow>>,
     ) -> Self {
-        const GRAMMAR: &'static str = include_str!("../console_command.bnf");
+        const GRAMMAR: &'static str = include_str!("./console_command.bnf");
         let command_grammar: bnf::Grammar = GRAMMAR.parse().unwrap();
 
         // setup some console commands
