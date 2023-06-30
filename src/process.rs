@@ -11,7 +11,7 @@ use crate::{
     camera::{Angle, ScreenCamera},
     debug_ui::{self, EguiDebugUi},
     entity_component::{Entity, EntityTable},
-    graphics::{GraphicsSystem, K9Renderer, SceneDirectorComponent},
+    graphics::{GraphicsSystem, K9Renderer},
     profile::ProfileSet,
     system::{FirstCallState, FrameState, SystemCallbacks},
 };
@@ -56,13 +56,6 @@ pub fn run(args: Option<CreationArgs>) -> Result<(), String> {
 
     // init entities
     let mut entities = EntityTable::new();
-    let scene_dir = {
-        let mut ent = Entity::new();
-        let comp = SceneDirectorComponent::new();
-        ent.add_component(comp);
-        ent
-    };
-    entities.add_new_entity(scene_dir);
 
     // init sdl
     windows_dpi::enable_dpi();

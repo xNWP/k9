@@ -22,18 +22,3 @@ pub struct Vertex {
 }
 unsafe impl Pod for Vertex {}
 unsafe impl Zeroable for Vertex {}
-
-pub struct SceneDirectorComponent {
-    active_camera: Option<Uuid>,
-}
-impl SceneDirectorComponent {
-    pub fn new() -> Self {
-        Self {
-            active_camera: None,
-        }
-    }
-}
-impl Component for SceneDirectorComponent {
-    const NAME: &'static str = "SceneDirector";
-    const UUID: Uuid = uuid::uuid!("c4e971e4-5fbb-4fb8-94b3-fc092b78ba53");
-}
